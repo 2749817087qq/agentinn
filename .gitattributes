@@ -1,0 +1,19 @@
+# 统一行尾为 LF —— 本 skill 的 install.sh 载荷一致性校验（verify_payload.py）
+# 依赖**字节一致**，Windows 下 core.autocrlf 的 LF→CRLF 转换会破坏该保证。
+* text=auto eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+*.sh   text eol=lf
+
+# 二进制（勿转换）
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.exe  binary
+*.zip  binary
