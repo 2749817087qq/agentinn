@@ -1,0 +1,36 @@
+# spec.yaml — 行为规格（Canonical YAML）
+# Change: relay-v561-agenthub-wiring
+# Capability（改）: unified-onboarding
+# 本文件仅含本 change 对该 capability 的**增量**需求（其余需求见项目级 .fstdd/canonical/specs/*/unified-onboarding.yaml）
+
+meta:
+  capability: "unified-onboarding"
+  change_id: "2026-10-12-relay-v561-agenthub-wiring"
+  created: "2026-10-12T23:20:00+08:00"
+  confidence: high
+
+requirements:
+  - id: "REQ-UOB-012"
+    description: "onboard-status / onboard 的 agenthub 对象扩展（只增字段，不改既有 pref/onboarded 语义）"
+    scenarios:
+      - id: "SC-011"
+        confidence: high
+        evidence: "proposal C1；约束「onboard-status 既有字段向后兼容（只增不改）」。"
+        given: "任意 state（含或不含 relay_onboard）"
+        when: "执行 onboard-status"
+        then: "agenthub 对象 SHALL 含 pref / onboarded / action / prompted_on 四键"
+        and:
+          - "pref / onboarded 的取值语义 SHALL 与改动前逐字一致（SC-011 原语义不变）"
+          - "action / prompted_on 为新增键，缺省分别为 \"none\" / null"
+
+  - id: "REQ-UOB-013"
+    description: "onboard set（写）保留既有 agenthub_prompted_on，避免重跑向导清空当日防打扰记录"
+    scenarios:
+      - id: "SC-012"
+        confidence: medium
+        evidence: "proposal C3；cmd_onboard_set L4677 现整体重建 relay_onboard ⇒ 需显式 carry-over。"
+        given: "state.relay_onboard.agenthub_prompted_on 已为今天；随后执行 onboard set（agenthub_pref=true）"
+        when: "读回 state.relay_onboard"
+        then: "agenthub_prompted_on SHALL 仍为今天（未被清空）"
+        and:
+          - "confirmed_at / last_config_hash SHALL 按本次 set 更新（其余字段正常刷新）"

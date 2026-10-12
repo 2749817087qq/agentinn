@@ -1,0 +1,101 @@
+# spec.yaml — 行为规格（Canonical YAML）
+# Change: relay-v561-agenthub-wiring
+# Capability（新）: agenthub-pref-consumer
+# 配套 proposal: canonical/proposals/2026-10-12-relay-v561-agenthub-wiring.yaml
+
+meta:
+  capability: "agenthub-pref-consumer"
+  change_id: "2026-10-12-relay-v561-agenthub-wiring"
+  created: "2026-10-12T23:20:00+08:00"
+  confidence: high
+
+requirements:
+  - id: "REQ-APC-001"
+    description: "onboard-status / onboard（读）暴露派生判据 agenthub.action（纯由 pref × onboarded 推导）"
+    scenarios:
+      - id: "SC-001"
+        confidence: high
+        evidence: "proposal C1 / SC1；pick_model.py _onboard_agenthub_view L4498。"
+        given: "state.relay_onboard.agenthub_pref=true 且 state.agenthub_onboarded 缺失/false"
+        when: "执行 onboard-status（或 onboard 读）"
+        then: "输出 agenthub.action SHALL == \"prompt_enable\""
+        and:
+          - "agenthub.pref SHALL == true；agenthub.onboarded SHALL == false"
+      - id: "SC-002"
+        confidence: high
+        evidence: "proposal C1 / SC1；SC-011 双层语义（偏好≠已开通，反之亦然）。"
+        given: "state.relay_onboard.agenthub_pref=true 且 state.agenthub_onboarded=true"
+        when: "执行 onboard-status"
+        then: "输出 agenthub.action SHALL == \"none\""
+        and:
+          - "agenthub.onboarded SHALL == true（已开通 ⇒ 不再需要发起）"
+      - id: "SC-003"
+        confidence: high
+        evidence: "proposal C1 / SC1（其余三态 ⇒ none）；严格 `is True` 判定，避免 None 被当 true。"
+        given: "state.relay_onboard.agenthub_pref=false（或 relay_onboard 缺失 ⇒ pref=None）"
+        when: "执行 onboard-status"
+        then: "输出 agenthub.action SHALL == \"none\""
+      - id: "SC-004"
+        confidence: high
+        evidence: "proposal C1（四态穷举）。"
+        given: "state.relay_onboard.agenthub_pref=false 且 state.agenthub_onboarded=true"
+        when: "执行 onboard-status"
+        then: "输出 agenthub.action SHALL == \"none\""
+
+  - id: "REQ-APC-002"
+    description: "防打扰记录 agenthub.prompted_on（本地自然日）+ 新写入路径 `onboard agenthub-ack`"
+    scenarios:
+      - id: "SC-005"
+        confidence: high
+        evidence: "proposal C3 / SC6；日期口径对齐 _onboard_due 的 now_utc().date()（L4438-4439）。"
+        given: "state.relay_onboard 存在（向导已确认）"
+        when: "执行 onboard agenthub-ack"
+        then: "state.relay_onboard.agenthub_prompted_on SHALL 被写为当前自然日（now_utc().date().isoformat()）"
+        and:
+          - "后续 onboard-status 的 agenthub.prompted_on SHALL 等于该日期"
+          - "relay_onboard 其余字段（confirmed_at/groups/custom_periods/agenthub_pref/last_config_hash）SHALL 保持不变"
+      - id: "SC-006"
+        confidence: high
+        evidence: "proposal C3（不重复发起）；幂等性为可验证性质。"
+        given: "同一自然日内已执行过一次 onboard agenthub-ack"
+        when: "再次执行 onboard agenthub-ack"
+        then: "agenthub_prompted_on SHALL 仍为该自然日（幂等，无副作用）"
+      - id: "SC-007"
+        confidence: high
+        evidence: "proposal C1/C3；脏数据降级不报错（对齐既有 SC-010 口径）。"
+        given: "state.relay_onboard 缺失（向导从未确认）"
+        when: "执行 onboard agenthub-ack"
+        then: "SHALL 返回 ok=false（reason=no_relay_onboard）且 SHALL NOT 创建/改写 state"
+        and:
+          - "进程退出码 SHALL 为 0（前置不满足，非用法错误）"
+
+  - id: "REQ-APC-003"
+    description: "联动规则文档化：Agent 读到 prompt_enable ⇒ 发起开通；已提示当日/已开通 ⇒ 跳过（grep 可验证）"
+    scenarios:
+      - id: "SC-008"
+        confidence: high
+        evidence: "proposal C2 / SC4；relay_instruction.md 现仅 L59-60 说明双层存储，无联动规则。"
+        given: "relay_instruction.md 文本"
+        when: "检索 action 联动规则"
+        then: "SHALL 含「agenthub.action == prompt_enable ⇒ 发起 AgentHub 开通（multihub-node-onboarding）」规则"
+        and:
+          - "SHALL 含「onboarded==true 或 prompted_on==今天 ⇒ 跳过」规则"
+          - "SHALL 含「发起后执行 onboard agenthub-ack 记录当日」规则"
+      - id: "SC-009"
+        confidence: high
+        evidence: "proposal C2 / SC4；SKILL.md 为 Agent 主指令面。"
+        given: "SKILL.md 文本"
+        when: "检索 action 联动规则"
+        then: "SHALL 含与 relay_instruction.md 一致的联动规则（prompt_enable / onboarded / ack 三要点）"
+
+  - id: "REQ-APC-004"
+    description: "新增 state 子键 agenthub_prompted_on 在「重建 state」路径下不被静默丢失（EXP-2026-0001 交叉检查）"
+    scenarios:
+      - id: "SC-010"
+        confidence: high
+        evidence: "EXP-2026-0001（context_loss/high）；pick_model.py 策略切换保留集 L2232-2233 已含 RELAY_ONBOARD_KEY。"
+        given: "state.relay_onboard.agenthub_prompted_on 已写为某自然日"
+        when: "执行 next --strategy <切换策略>（触发 state 重建）"
+        then: "重建后的 state.relay_onboard SHALL 保留 agenthub_prompted_on（及其余 relay_onboard 字段）"
+        and:
+          - "SHALL NOT 因策略切换而丢弃该键（relay_onboard 整体在保留集内）"

@@ -1,0 +1,37 @@
+# agent_spec.yaml — Agent 验证规格（Canonical YAML）
+# Change: relay-v561-agenthub-wiring
+# Capability: unified-onboarding（本 change 的增量验证）
+# coding 任务：CP 检查点对应 spec.yaml Scenario，assertions 对应 THEN
+
+meta:
+  task_id: "verify-unified-onboarding-aw"
+  change_id: "2026-10-12-relay-v561-agenthub-wiring"
+  task_type: code
+  system: "free-model-relay pick_model.py；被测 = cmd_onboard_status / cmd_onboard_set（agenthub 对象扩展 + prompted_on carry-over）"
+  preconditions:
+    - "测试以 importlib 加载被测 pick_model.py；HOME 指向临时目录隔离"
+    - "对照 v5.6.0 的 pref/onboarded 语义做逐字回归（只增不改）"
+    - "被测脚本输出仅 ASCII（与 run-all.py text=True 解码链路兼容）"
+
+steps:
+  - id: "CP-1"
+    description: "SC-011 agenthub 对象四键齐备且 pref/onboarded 语义不变"
+    action: "对含 relay_onboard 的临时 HOME 执行 onboard-status，校验 agenthub 键集合；再对 relay_onboard 缺失场景执行"
+    assertions:
+      - type: stdout_contains
+        expected: "\"pref\""
+      - type: stdout_contains
+        expected: "\"prompted_on\""
+  - id: "CP-2"
+    description: "SC-012 onboard set 保留既有 prompted_on"
+    action: "先 ack 记录今天，再执行 onboard set（agenthub_pref=true）；读回 relay_onboard.agenthub_prompted_on"
+    assertions:
+      - type: exit_code
+        expected: 0
+      - type: stdout_contains
+        expected: "agenthub_prompted_on"
+
+rollback:
+  steps:
+    - "删除测试期间在临时 HOME 下生成的 state/models.json/usage（finally 清理）"
+    - "确认真实 ~/.workbuddy / ~/.workbuddy-ai 下 state 与 models.json 哈希未被改动"

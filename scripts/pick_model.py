@@ -4234,12 +4234,15 @@ def cmd_window(args):
 
 
 def _dispatch_onboard(args):
-    """`onboard` 双路径分派：show（默认，读）/ set（写）。
+    """`onboard` 多路径分派：show（默认，读）/ set（写）/ agenthub-ack（写，v5.6.1）。
 
     跟随 free / window 的**位置参数 action** 惯例，保持 CLI 心智一致。
     """
-    if getattr(args, "onboard_action", "show") == "set":
+    action = getattr(args, "onboard_action", "show")
+    if action == "set":
         return cmd_onboard_set(args)
+    if action == "agenthub-ack":
+        return cmd_onboard_agenthub_ack(args)
     return cmd_onboard(args)
 
 
@@ -4336,6 +4339,8 @@ def cmd_status(args):
 
 RELAY_ONBOARD_KEY = "relay_onboard"
 AGENTHUB_ONBOARDED_KEY = "agenthub_onboarded"
+# v5.6.1：AgentHub 偏好消费端 —— 「最近一次已发起提示」的本地自然日（防打扰，每自然日一次）
+AGENTHUB_PROMPTED_KEY = "agenthub_prompted_on"
 # 桥接来源工具标签（自定义渠道中的「非纯 BYOK」）—— 与 origins 分类口径一致
 BRIDGED_TOOLS = ("qoder-free", "ow-bridge", "external")
 
@@ -4495,17 +4500,33 @@ def migrate_to_relay_onboard(state, _scanner=None):
     }
 
 
+def _agenthub_action(pref, onboarded):
+    """派生动作判据（SC-001~004）：仅「偏好为真 且 未开通」⇒ `prompt_enable`，否则 `none`。
+
+    严格 `pref is True`：None / 非布尔真值一律不触发（脏数据不得误发起开通）。
+    纯本地派生，零网络、零副作用。
+    """
+    return "prompt_enable" if (pref is True and not onboarded) else "none"
+
+
 def _onboard_agenthub_view(state):
-    """AgentHub 双层视图：偏好（toggle）与开通完成态分离（SC-011 / R-AGHUB）。
+    """AgentHub 视图：偏好 / 开通完成态 / 派生动作 / 最近提示日（SC-011 + v5.6.1 接线）。
 
     `pref` 来自 state.relay_onboard.agenthub_pref（用户在向导里的勾选）；
-    `onboarded` 来自 state.agenthub_onboarded（**只由** multihub-node-onboarding 写）。
-    两者分离存储，避免「偏好为真」被误当「已开通」。
+    `onboarded` 来自 state.agenthub_onboarded（**只由** multihub-node-onboarding 写）；
+    `action` 为**纯派生**判据（`pref is True and not onboarded` ⇒ prompt_enable）；
+    `prompted_on` 为最近一次「已提示」的本地自然日（`onboard agenthub-ack` 写），
+    供 Agent 做**每自然日一次**的防打扰（v5.6.1）。
+    两者分离存储，避免「偏好为真」被误当「已开通」；本 change **只增字段**，
+    `pref` / `onboarded` 语义与改动前逐字一致（向后兼容）。
     """
     ro = state.get(RELAY_ONBOARD_KEY) if isinstance(state, dict) else None
     pref = ro.get("agenthub_pref") if isinstance(ro, dict) else None
     onboarded = bool(state.get(AGENTHUB_ONBOARDED_KEY)) if isinstance(state, dict) else False
-    return {"pref": pref, "onboarded": onboarded}
+    prompted_on = ro.get(AGENTHUB_PROMPTED_KEY) if isinstance(ro, dict) else None
+    return {"pref": pref, "onboarded": onboarded,
+            "action": _agenthub_action(pref, onboarded),
+            "prompted_on": prompted_on}
 
 
 def _scan_bridged_free_window(model, _probe=None):
@@ -4670,17 +4691,25 @@ def cmd_onboard_set(args):
     last_hash = _config_hash(groups, custom_periods)
 
     # 4 + 5：state 一次落盘（relay_onboard + free_allowlist；不写 agenthub_onboarded）
+    carried_prompted_on = None
     try:
         with state_file_lock():
             state = load_state()
             state[FREE_ALLOWLIST_KEY] = {"ids": sel, "confirmed_at": confirmed_at}
-            state[RELAY_ONBOARD_KEY] = {
+            prev_ro = state.get(RELAY_ONBOARD_KEY)
+            new_ro = {
                 "confirmed_at": confirmed_at,
                 "groups": groups,
                 "custom_periods": custom_periods,
                 "agenthub_pref": agenthub_pref,
                 "last_config_hash": last_hash,
             }
+            # v5.6.1：保留既有「已提示日」——重跑向导不应清空当日防打扰记录（SC-012）。
+            # relay_onboard 为整体重建；若不显式 carry-over，用户重跑向导后会被立刻再提示一次。
+            if isinstance(prev_ro, dict) and isinstance(prev_ro.get(AGENTHUB_PROMPTED_KEY), str):
+                new_ro[AGENTHUB_PROMPTED_KEY] = prev_ro[AGENTHUB_PROMPTED_KEY]
+                carried_prompted_on = new_ro[AGENTHUB_PROMPTED_KEY]
+            state[RELAY_ONBOARD_KEY] = new_ro
             save_state(state)
     except TimeoutError as e:
         print(json.dumps({"error": f"state lock timeout: {e}",
@@ -4695,9 +4724,50 @@ def cmd_onboard_set(args):
         "free_allowlist": {"ids": sel, "confirmed_at": confirmed_at},
         "relay_onboard": {"confirmed_at": confirmed_at,
                           "last_config_hash": last_hash,
-                          "agenthub_pref": agenthub_pref},
+                          "agenthub_pref": agenthub_pref,
+                          "agenthub_prompted_on": carried_prompted_on},
         "agenthub_onboarded_written": False,
     }, indent=2, ensure_ascii=False))
+
+
+def cmd_onboard_agenthub_ack(args):
+    """记录「今日已发起 AgentHub 开通提示」（**写**，v5.6.1 接线）。
+
+    写 `state.relay_onboard.agenthub_prompted_on = now_utc().date().isoformat()`：
+      - **读-改-写**，保留 relay_onboard 其余字段（confirmed_at/groups/.../agenthub_pref）；
+      - **同日重复调用幂等**（值不变）；
+      - **适用性门控**（防御）：仅当 `agenthub.action == "prompt_enable"`（即确实有待发起的开通）
+        才记录；否则返回 `ok=false`（reason=not_applicable）且不落盘 —— 避免误调 ack 后，
+        同一自然日内正当的开通提示被 `prompted_on` 静默抑制；
+      - 前置不满足（relay_onboard 缺失）⇒ `ok=false`（reason=no_relay_onboard）且
+        **不落盘**、退出码 0（前置不满足，非用法错误）。
+    供 Agent 做**每自然日一次**的防打扰：同日已提示过就不再重复发起开通流程。
+    """
+    try:
+        with state_file_lock():
+            state = load_state()
+            ro = state.get(RELAY_ONBOARD_KEY) if isinstance(state, dict) else None
+            if not isinstance(ro, dict):
+                result = {"ok": False, "reason": "no_relay_onboard",
+                          "hint": "先完成启用向导（onboard set）再记录提示"}
+            else:
+                view = _onboard_agenthub_view(state)
+                if view.get("action") != "prompt_enable":
+                    result = {"ok": False, "reason": "not_applicable",
+                              "agenthub": view,
+                              "hint": "当前无待发起的 AgentHub 开通（偏好未开或已开通），无需记录提示"}
+                else:
+                    today = now_utc().date().isoformat()
+                    ro[AGENTHUB_PROMPTED_KEY] = today
+                    state[RELAY_ONBOARD_KEY] = ro
+                    save_state(state)
+                    result = {"ok": True, "action": "agenthub_ack",
+                              "agenthub_prompted_on": today}
+    except TimeoutError as e:
+        print(json.dumps({"error": f"state lock timeout: {e}",
+                          "hint": "并发写入 STATE_FILE 超时，请稍后重试"}, ensure_ascii=False))
+        sys.exit(1)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def _current_onboard_groups(_scanner=None):
@@ -4794,7 +4864,8 @@ def main():
     p_onboard = sub.add_parser("onboard",
                                help="统一启用向导：汇总系统/自定义/桥接模型 + AgentHub（读）")
     p_onboard.add_argument("onboard_action", nargs="?", default="show",
-                           choices=["show", "set"], help="show（默认，读）/ set（写）")
+                           choices=["show", "set", "agenthub-ack"],
+                           help="show（默认，读）/ set（写）/ agenthub-ack（写：记录今日已提示）")
     p_onboard.add_argument("--json", default=None, dest="json",
                            help="set：向导结果 JSON（groups / custom_periods / agenthub_pref）")
 

@@ -1,0 +1,11 @@
+designs: {}
+proposals:
+  2026-10-12-relay-v561-agenthub-wiring: proposals/2026-10-12-relay-v561-agenthub-wiring.yaml
+specs:
+  agent:
+    agenthub-pref-consumer: specs/agent/agenthub-pref-consumer.yaml
+    unified-onboarding: specs/agent/unified-onboarding.yaml
+  code:
+    agenthub-pref-consumer: specs/code/agenthub-pref-consumer.yaml
+    unified-onboarding: specs/code/unified-onboarding.yaml
+version: '2.9'

@@ -116,3 +116,31 @@ requirements:
         then: "SHALL 写 state.relay_onboard.agenthub_pref=true"
         and:
           - "SHALL NOT 因偏好为真就写 agenthub_onboarded=true（开通完成态只由 multihub-node-onboarding 写）"
+
+# ── 合并自 2026-10-12-relay-v561-agenthub-wiring（v5.6.1，归档于 2026-10-12）──
+# SC 编号在原 change 内为 SC-011/SC-012（change 全局序号）；合并入本 capability 时
+# 因 SC-011 已被 REQ-UOB-006 占用，顺延重编为 SC-012/SC-013（语义不变）。
+  - id: "REQ-UOB-012"
+    description: "onboard-status / onboard 的 agenthub 对象扩展（只增字段，不改既有 pref/onboarded 语义）"
+    scenarios:
+      - id: "SC-012"
+        confidence: high
+        evidence: "proposal C1；约束「onboard-status 既有字段向后兼容（只增不改）」。原 change SC-011。"
+        given: "任意 state（含或不含 relay_onboard）"
+        when: "执行 onboard-status"
+        then: "agenthub 对象 SHALL 含 pref / onboarded / action / prompted_on 四键"
+        and:
+          - "pref / onboarded 的取值语义 SHALL 与改动前逐字一致（SC-011 原语义不变）"
+          - "action / prompted_on 为新增键，缺省分别为 \"none\" / null"
+
+  - id: "REQ-UOB-013"
+    description: "onboard set（写）保留既有 agenthub_prompted_on，避免重跑向导清空当日防打扰记录"
+    scenarios:
+      - id: "SC-013"
+        confidence: medium
+        evidence: "proposal C3；cmd_onboard_set 现整体重建 relay_onboard ⇒ 需显式 carry-over。原 change SC-012。"
+        given: "state.relay_onboard.agenthub_prompted_on 已为今天；随后执行 onboard set（agenthub_pref=true）"
+        when: "读回 state.relay_onboard"
+        then: "agenthub_prompted_on SHALL 仍为今天（未被清空）"
+        and:
+          - "confirmed_at / last_config_hash SHALL 按本次 set 更新（其余字段正常刷新）"

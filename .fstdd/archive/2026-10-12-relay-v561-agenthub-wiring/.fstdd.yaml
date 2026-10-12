@@ -1,0 +1,67 @@
+baseline:
+  at: '2026-10-12T15:14:41+00:00'
+  base_git_sha: 21c7f0fd912dc515857b3aaa093ba08c84a6c4cd
+  clock_source: system
+  established_by: gate1
+  node_id: DESKTOP-1MEQDMR
+change_id: 2026-10-12-relay-v561-agenthub-wiring
+complexity_score: 7
+current_phase: deliver
+design_adjustments:
+  count: 3
+long_range:
+  enabled: true
+  mode: full_auto
+  pre_auth_completed: true
+  pre_auth_timestamp: '2026-10-12T23:44:47+08:00'
+mode: standard
+phases:
+  build:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-12T17:13:36+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 确认 Gate 3 通过
+    slices_completed:
+      S1:
+        new_tests: 5
+        status: done
+        tc_coverage: 5/5
+        verified_at: '2026-10-12T16:31:00+00:00'
+      S2:
+        new_tests: 3
+        status: done
+        tc_coverage: 3/3
+        verified_at: '2026-10-12T16:31:00+00:00'
+      S3:
+        new_tests: 2
+        status: done
+        tc_coverage: 2/2
+        verified_at: '2026-10-12T16:31:00+00:00'
+      S4:
+        new_tests: 2
+        status: done
+        tc_coverage: 2/2
+        verified_at: '2026-10-12T16:31:00+00:00'
+    status: completed
+  deliver:
+    status: completed
+  spec:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-12T15:37:42+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 确认
+    status: completed
+  understand:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-12T15:14:41+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 确认 Gate 1
+    status: completed
+score_confidence: high
+status: archived
+task_type: code
+traceability:
+  spec_scenarios: 12
+  tc_cases: 13
+  test_functions: 13
+version: '3.0'

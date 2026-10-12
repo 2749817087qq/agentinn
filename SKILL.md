@@ -27,7 +27,7 @@ description: |
           流量统计、模型配额、自动切换、免费量到了、hy3、hy4、平台模型、免费时段、
           确认免费模型、免费模型白名单、额度用完、额度告警、
           时段滚轮、免费时段确认、改免费时段、window set、relay-window
-version: "5.6.0"
+version: "5.6.1"
 author: agent_created
 license: unknown
 
@@ -196,6 +196,24 @@ $PY $SCRIPT onboard set --json '{"groups":{...},"custom_periods":{...},"agenthub
 1. `set` 的 JSON 直接作为 `--json` 入参，**不改造**（`onboard set` 自己校验）。
 2. `onboard set` 返回含 `error` ⇒ **原样回显**，不重试、不改其它字段。
 3. **不修改系统模型时段** —— 系统模型由宿主规范定义，只读。
+
+### AgentHub 接线（v5.6.1）
+
+`onboard-status` / `onboard` 的 `agenthub` 对象含**派生判据**，Step 0 据此联动：
+
+| 字段 | 含义 |
+|------|------|
+| `pref` | 偏好（向导 toggle 写入 `relay_onboard.agenthub_pref`） |
+| `onboarded` | 开通完成态（**只由** `multihub-node-onboarding` 写） |
+| `action` | 派生：`pref is True and not onboarded` ⇒ `prompt_enable`，否则 `none` |
+| `prompted_on` | 最近一次「已提示」的本地自然日（`onboard agenthub-ack` 写） |
+
+**联动规则**：
+
+1. `agenthub.action == "prompt_enable"` 且 `agenthub.prompted_on != 今天` ⇒ **发起** AgentHub 开通流程
+   （调 `multihub-node-onboarding` skill，本机面板交互授权）。
+2. 发起后**立即**执行 `pick_model.py onboard agenthub-ack` 记录当日 —— 防打扰，**每自然日一次**。
+3. `agenthub.onboarded == true` 或 `agenthub.prompted_on == 今天` ⇒ **跳过**，不再发起/提示。
 
 ### 降级规则
 

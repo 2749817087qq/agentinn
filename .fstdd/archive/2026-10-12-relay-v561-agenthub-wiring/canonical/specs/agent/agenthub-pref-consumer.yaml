@@ -1,0 +1,67 @@
+# agent_spec.yaml — Agent 验证规格（Canonical YAML）
+# Change: relay-v561-agenthub-wiring
+# Capability: agenthub-pref-consumer
+# coding 任务：CP 检查点对应 spec.yaml Scenario，assertions 对应 THEN
+
+meta:
+  task_id: "verify-agenthub-pref-consumer"
+  change_id: "2026-10-12-relay-v561-agenthub-wiring"
+  task_type: code
+  system: "free-model-relay pick_model.py；被测 = _onboard_agenthub_view / cmd_onboard_status / cmd_onboard_agenthub_ack / _dispatch_onboard / cmd_next(策略切换保留集)"
+  preconditions:
+    - "测试以 importlib 加载被测 pick_model.py；HOME 指向临时目录隔离，不触碰真实 models.json/state"
+    - "时间通过 now_utc 注入或 monkeypatch 固定，保证「自然日」断言可复现"
+    - "被测脚本输出仅 ASCII（与 run-all.py text=True 解码链路兼容）"
+
+steps:
+  - id: "CP-1"
+    description: "SC-001/002/003/004 action 四态穷举"
+    action: "构造 4 组 state（pref × onboarded）分别写临时 HOME；逐一执行 onboard-status，读 agenthub.action"
+    assertions:
+      - type: stdout_contains
+        expected: "\"action\": \"prompt_enable\""
+      - type: stdout_contains
+        expected: "\"action\": \"none\""
+  - id: "CP-2"
+    description: "SC-005 ack 写入 prompted_on=当天 且不动其余字段"
+    action: "临时 HOME 预置完整 relay_onboard；执行 onboard agenthub-ack；读 state.relay_onboard"
+    assertions:
+      - type: exit_code
+        expected: 0
+      - type: stdout_contains
+        expected: "agenthub_prompted_on"
+  - id: "CP-3"
+    description: "SC-006 ack 幂等（同日二次 ack 值不变）"
+    action: "同日连续两次 onboard agenthub-ack；比较两次后 state 的 agenthub_prompted_on"
+    assertions:
+      - type: exit_code
+        expected: 0
+  - id: "CP-4"
+    description: "SC-007 relay_onboard 缺失时 ack 返回 ok=false 且不写 state"
+    action: "临时 HOME 置空 state；执行 onboard agenthub-ack；读 state 文件哈希"
+    assertions:
+      - type: exit_code
+        expected: 0
+      - type: stdout_contains
+        expected: "no_relay_onboard"
+  - id: "CP-5"
+    description: "SC-008/009 文档联动规则可 grep"
+    action: "grep relay_instruction.md 与 SKILL.md 的 prompt_enable / agenthub-ack 规则串"
+    assertions:
+      - type: stdout_contains
+        expected: "prompt_enable"
+      - type: stdout_contains
+        expected: "agenthub-ack"
+  - id: "CP-6"
+    description: "SC-010 策略切换保留 agenthub_prompted_on（EXP-2026-0001）"
+    action: "预置 relay_onboard.agenthub_prompted_on；执行 next --strategy 切换；读 state"
+    assertions:
+      - type: exit_code
+        expected: 0
+      - type: stdout_contains
+        expected: "agenthub_prompted_on"
+
+rollback:
+  steps:
+    - "删除测试期间在临时 HOME 下生成的 state/models.json/usage（finally 清理）"
+    - "确认真实 ~/.workbuddy / ~/.workbuddy-ai 下 state 与 models.json 哈希未被改动（_REAL_HOME_BEFORE 守卫）"

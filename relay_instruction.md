@@ -58,6 +58,16 @@ python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" onboard
 - **all-day 语义**：`{start_hour:0,end_hour:0}` 表示恒真（全天可用）。
 - **AgentHub 双层**：`agenthub_pref`（偏好）与 `agenthub_onboarded`（开通完成态）**分开存储** ——
   偏好为真**不代表**已开通；开通走 `multihub-node-onboarding` skill（本机面板交互）。
+- **AgentHub 接线（v5.6.1）**：`onboard-status` / `onboard` 的 `agenthub` 对象含派生判据 `action`
+  （`pref is True and not onboarded` ⇒ `prompt_enable`，否则 `none`）与 `prompted_on`（最近一次提示的本地自然日）。
+  **联动规则（Step 0 必做）**：
+  1. `agenthub.action == "prompt_enable"` 且 `agenthub.prompted_on != 今天` ⇒ **发起** AgentHub 开通流程
+     （调 `multihub-node-onboarding` skill，本机面板交互授权）；
+  2. 发起后**立即**执行 `onboard agenthub-ack` 记录当日 —— 防打扰，**每自然日一次**：
+     ```bash
+     python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" onboard agenthub-ack
+     ```
+  3. `agenthub.onboarded == true` 或 `agenthub.prompted_on == 今天` ⇒ **跳过**，不再发起/提示。
 - 你（子代理）**通常没有提问能力**：如果你是主会话，渲染向导组件；如果你是被调起的子代理，
   把 `onboard` 输出原样回报给主会话，**不要自己猜时段**。
 - 白名单为空 → 降级不阻断：`next` 输出 `allowlist: "unset"`，退回既有规则，退出码 0。

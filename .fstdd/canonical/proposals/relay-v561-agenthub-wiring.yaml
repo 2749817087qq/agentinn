@@ -1,0 +1,112 @@
+# 2026-10-12-relay-v561-agenthub-wiring.yaml — Canonical Proposal (YAML-first, V2.9)
+# AI 起草、AI 修改、AI 消费。Human View 由 `stdd canon generate` 生成。
+# 合并自 changes/2026-10-12-relay-v561-agenthub-wiring/（归档于 2026-10-12）
+
+meta:
+  change_id: "2026-10-12-relay-v561-agenthub-wiring"
+  title: "free-model-relay v5.6.1：接线 AgentHub 偏好（agenthub_pref 消费端落地）"
+  created: "2026-10-12T23:12:00+08:00"
+  status: draft
+  version: "2.9"
+
+why:
+  problem: >
+    统一启用向导（v5.6.0）第 ④ 段的「新对话自动启用 AgentHub 协作中枢」复选框目前是**半成品**：
+    勾选后只往 state.relay_onboard.agenthub_pref 写一个布尔值，**没有任何消费方**。
+    实测三条证据：(1) 全库检索 agenthub_pref —— 除 free-model-relay 自身在 onboard / onboard-status
+    输出里回显外，无其它消费者；(2) skills/multihub-node-onboarding/ 下 0 命中，该 skill 不读此键；
+    (3) relay_instruction.md / SKILL.md 也没有「读到 pref=true 就发起开通」的规则。
+    ⇒ 用户勾选后**毫无行为**（既不提示、也不发起开通），「新对话自动启用」的承诺**未兑现**，
+    控件存在但无行为 —— 属静默失效（正是本项目反复踩的「假绿」类问题）。
+  motivation: >
+    两条路：接线（让 pref 真正驱动行为）或撤下控件。用户在 2026-10-12 对话中明确选择**接线**。
+    接线成本低：onboard-status 已经返回 agenthub.{pref, onboarded} 两个字段，只缺一个**无歧义的
+    派生判据**与**Agent 侧联动规则**；不接线的代价是用户以为已启用、实际什么都没发生。
+  evidence:
+    observed_at: "2026-10-12T23:09:00+08:00"
+    observed_base_git_sha: "relay v5.6.0（skill 目录已 git 化，tag v5.6.0 → commit 21c7f0f）"
+    details: >
+      2026-10-12 全库检索 agenthub_pref 的实测结果：仅 scripts/pick_model.py 出现
+      （_onboard_agenthub_view / cmd_onboard / cmd_onboard_set / cmd_onboard_status，均为「写入或回显」）；
+      C:/Users/Administrator/.workbuddy-ai/skills/multihub-node-onboarding/ 下 0 命中；
+      relay_instruction.md 仅第 59-60 行说明「agenthub_pref 与 agenthub_onboarded 分开存储、开通走
+      multihub-node-onboarding skill」，**无**「pref=true 时自动发起」的规则。
+      state 实测：relay_onboard: null（向导未确认过）、agenthub_onboarded: None（未开通）。
+
+what_changes:
+  - id: C1
+    description: >
+      onboard-status 输出新增**派生动作字段** agenthub.action（取值 prompt_enable | none），
+      由 `pref == true AND onboarded == false` 推导 —— 给 Agent 一个无歧义的判据，不必自行组合两个布尔。
+      只增字段、不改既有字段语义（向后兼容）。
+    type: modified
+  - id: C2
+    description: >
+      在 relay_instruction.md 与 SKILL.md 固化**联动规则**：Step 0 读到 agenthub.action == "prompt_enable"
+      ⇒ **发起** AgentHub 开通流程（调 multihub-node-onboarding skill，本机面板交互）；
+      agenthub.onboarded == true ⇒ 跳过、不再提示。
+    type: modified
+  - id: C3
+    description: >
+      **防打扰**：引入「已提示」记录（如 state.agenthub_prompted_at），避免每次新对话重复发起开通流程。
+      具体粒度（一次性 / 每自然日一次）由 Phase 2 设计确定；本 change 只要求「不重复发起」这一可验证性质。
+    type: new
+  - id: C4
+    description: >
+      新增测试 TC-AW-001~00x：action 派生四态（pref×onboarded 组合）、onboarded 后静默、
+      防重复提示生效、文档规则存在（grep 可验证）。
+    type: new
+
+capabilities:
+  new:
+    - name: "agenthub-pref-consumer"
+      description: "AgentHub 偏好消费端：派生判据（agenthub.action）+ Agent 联动规则 + 防重复提示"
+  modified:
+    - name: "unified-onboarding"
+      description: "onboard-status 输出扩展 agenthub.action 字段（只增不改）"
+
+constraints:
+  - "不得改变 agenthub_pref 的写入语义：向导仍只写 pref，**不**写 agenthub_onboarded"
+  - "开通流程必须仍走 multihub-node-onboarding skill（本机面板交互授权），不得在 relay 内伪造开通"
+  - "判据纯本地派生，不引入任何网络请求"
+  - "onboard-status 既有字段保持向后兼容（只增字段，不改语义）"
+
+stakeholders:
+  - "用户（本机唯一使用者）"
+  - "multihub-node-onboarding skill（被调用方）"
+
+risk_areas:
+  - capability: "agenthub-pref-consumer"
+    risk: "自动发起开通流程可能打扰 —— 用户勾了 pref 但不想每次新对话都被发起"
+    mitigation: "引入「已提示/已拒绝」状态（agenthub_prompted_at），按一次性或每自然日一次限制（Phase 2 定粒度）"
+  - capability: "agenthub-pref-consumer"
+    risk: "误把 pref（意愿）当 onboarded（完成态），导致「以为已开通」"
+    mitigation: "判据严格用 `pref && !onboarded`；文档显式写「偏好 ≠ 已开通」"
+  - capability: "unified-onboarding"
+    risk: "onboard-status 新增字段破坏既有测试断言"
+    mitigation: "只增字段、不改语义；全量回归 tests/run-all.py 守门"
+
+non_goals:
+  - "不改动 multihub-node-onboarding skill 本身"
+  - "不实现「静默自动开通」（开通必须经用户面板授权）"
+  - "不涉及 free-model-relay → agentinn 改名（另立 change）"
+
+critical:
+  is_critical: false
+  risk_assessment:
+    safety_critical: false
+    financial: false
+    cross_system: false
+
+anchoring:
+  level: L2
+  reference_changes: []
+  anchor_implementations: []
+
+success_criteria:
+  - "SC1：onboard-status 输出含 agenthub.action；pref=true 且 onboarded=false ⇒ prompt_enable，其余三态 ⇒ none"
+  - "SC2：用户勾选 agenthub_pref 后，新对话 Step 0 能自动发起 AgentHub 开通（或明确提示），不再「勾了无效果」"
+  - "SC3：onboarded=true ⇒ 不再发起/提示（幂等；连续多次调用输出一致）"
+  - "SC4：SKILL.md 与 relay_instruction.md 均含该联动规则（可 grep 验证）"
+  - "SC5：新增测试全绿 + 全量回归 25/25 rc=0"
+  - "SC6：防重复提示机制生效（同一自然日内不重复发起）"

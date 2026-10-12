@@ -81,8 +81,27 @@ steps:
     assertions:
       - type: exit_code
         expected: 0
+  # ── 合并自 2026-10-12-relay-v561-agenthub-wiring（v5.6.1）──
+  # 原 change CP-1/CP-2 → 顺延为 CP-11/CP-12；SC 引用同步重编（SC-011→SC-012, SC-012→SC-013）。
+  - id: "CP-11"
+    description: "SC-012 agenthub 对象四键齐备且 pref/onboarded 语义不变"
+    action: "对含 relay_onboard 的临时 HOME 执行 onboard-status，校验 agenthub 键集合；再对 relay_onboard 缺失场景执行"
+    assertions:
+      - type: stdout_contains
+        expected: "\"pref\""
+      - type: stdout_contains
+        expected: "\"prompted_on\""
+  - id: "CP-12"
+    description: "SC-013 onboard set 保留既有 prompted_on"
+    action: "先 ack 记录今天，再执行 onboard set（agenthub_pref=true）；读回 relay_onboard.agenthub_prompted_on"
+    assertions:
+      - type: exit_code
+        expected: 0
+      - type: stdout_contains
+        expected: "agenthub_prompted_on"
 
 expected_outcomes:
   - "onboard 读/写、onboard-status due 判定、next/inventory 透传、迁移、AgentHub 双层全部通过"
   - "系统模型时段只读、自定义/桥接模型逐模型可调、桥接扫描不阻断"
+  - "agenthub 对象四键齐备（含 action/prompted_on）、onboard set 保留 prompted_on（v5.6.1 增量）"
   - "TC-UOB-001~011 全绿；旧 relay-window-wheel 保留 fallback；全量回归绿（除已知环境问题）"
