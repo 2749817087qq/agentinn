@@ -1,0 +1,72 @@
+# agent_spec.yaml — Agent 验证规格（Canonical YAML）
+# Change: relay-v560-qoder-free-source
+# coding 任务：与 spec.yaml 配合，CP 检查点对应 spec Scenario，assertions 对应 THEN
+
+meta:
+  task_id: "verify-relay-v560-qoder-free-source"
+  change_id: "2026-10-12-relay-v560-qoder-free-source"
+  task_type: code
+  system: "free-model-relay pick_model.py（~/.workbuddy-ai 开发副本，同步至 ~/.workbuddy 权威副本）；被测 = discover_qoder_free / _detect_source_tool / load_models / cmd_next / cmd_origins / scan"
+  preconditions:
+    - "Qoder-free 已安装于 D:/tools/qoder-free（仅端到端 SC-001/006 需要；单测一律 mock 不触网）"
+    - "测试以 importlib 加载被测 pick_model.py；HOME 指向临时目录隔离，不触碰真实 models.json"
+    - "被测脚本输出仅 ASCII（与 run-all.py text=True 解码链路兼容）"
+
+steps:
+  - id: "CP-1"
+    description: "SC-001 探测成功写 Custom 条目（含 qoderFreeOwner/url/apiKey）"
+    action: "mock HTTP GET /v1/models 返回 data:[{id:'cn:qoder-free-x'}]；以临时 HOME 调用 discover_qoder_free()；读 models.json"
+    assertions:
+      - type: exit_code
+        expected: 0
+      - type: stdout_contains
+        expected: "qoderFreeOwner"
+  - id: "CP-2"
+    description: "SC-002 幂等 upsert（同 id 不重复创建；异 owner 不覆盖）"
+    action: "先写一条 qoderFreeOwner 条目，再跑 discover；再写一条 relayOwner 同名 id 跑 discover"
+    assertions:
+      - type: file_exists
+        expected: true
+  - id: "CP-3"
+    description: "SC-003 端点不可达静默跳过（不抛异常、不污染 stdout）"
+    action: "以不可达 base 调用 discover_qoder_free()"
+    assertions:
+      - type: exit_code
+        expected: 0
+      - type: stdout_contains
+        expected: ""
+  - id: "CP-4"
+    description: "SC-004 config 缺失静默跳过 + QODER_FREE_CONFIG 覆盖"
+    action: "指向不存在的 config 路径调用 discover；再以 QODER_FREE_CONFIG 指向合法 config 调用"
+    assertions:
+      - type: exit_code
+        expected: 0
+  - id: "CP-5"
+    description: "SC-005 TTL 缓存：TTL 内不重复联网"
+    action: "mock probe 计数；连续两次 cmd_next（间隔<TTL）"
+    assertions:
+      - type: stdout_contains
+        expected: "model"
+  - id: "CP-6"
+    description: "SC-007 origins 归类 qoder-free（tool=qoder-free, free_semantics third-party-managed）"
+    action: "临时 HOME 写含 qoderFreeOwner 条目的 models.json；执行 relay origins"
+    assertions:
+      - type: stdout_contains
+        expected: "qoder-free"
+  - id: "CP-7"
+    description: "SC-008 默认进池：inventory 列出 + next 默认返回无需 allowlist"
+    action: "临时 HOME 写 qoderFreeOwner 条目；执行 inventory 与 next --source auto"
+    assertions:
+      - type: stdout_contains
+        expected: "custom-local:"
+  - id: "CP-8"
+    description: "SC-009 零密钥泄漏：对外输出不含 apiKey 明文"
+    action: "写含真实 apiKey 的 qoderFreeOwner 条目；执行 list/inventory/profile/origins；grep 输出"
+    assertions:
+      - type: stdout_contains
+        expected: "apiKey"
+
+rollback:
+  steps:
+    - "删除测试期间在临时 HOME 下生成的 models.json / state / usage（已在 finally 清理）"
+    - "确认真实 ~/.workbuddy / ~/.workbuddy-ai 下的 models.json 哈希未被改动（_REAL_HOME_BEFORE 守卫）"

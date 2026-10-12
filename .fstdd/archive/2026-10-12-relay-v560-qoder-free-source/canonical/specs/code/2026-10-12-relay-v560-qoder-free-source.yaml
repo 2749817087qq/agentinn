@@ -1,0 +1,102 @@
+# spec.yaml — 行为规格（Canonical YAML）
+# Change: relay-v560-qoder-free-source
+# 配套 proposal: canonical/proposals/2026-10-12-relay-v560-qoder-free-source.yaml
+
+meta:
+  capability: "qoder-free-source-integration"
+  change_id: "2026-10-12-relay-v560-qoder-free-source"
+  created: "2026-10-12T19:10:00+08:00"
+  confidence: high
+
+requirements:
+  - id: "REQ-DISCOVER-001"
+    description: "discover_qoder_free 探测 Qoder-free /v1/models 并将模型以 Custom 条目（带 qoderFreeOwner）幂等写入 models.json"
+    scenarios:
+      - id: "SC-001"
+        confidence: high
+        evidence: "proposal C1 + observed_at=2026-10-12T18:25:00+08:00（QF 实测 GET /v1/models 带 key→200 返回标准 OpenAI 格式）；pick_model.py L1596-1599（Custom 全量纳入）、L3734（entry 字段）。"
+        given: "Qoder-free 已启动且已加账号；config.json 含合法 api_key 与 listen；models.json 当前不含该模型 id"
+        when: "调用 discover_qoder_free()（或 relay qoder-free sync）"
+        then: "SHALL 在 models.json 写入一条 Custom 条目，字段为 {id, vendor:\"Custom\", url:\"http://127.0.0.1:8210/v1\", apiKey:<QF key>, qoderFreeOwner:\"qoder-free\"}"
+        and:
+          - "条目 id SHALL 等于 /v1/models 返回的模型原始 id（保留 cn:/global: 区域前缀）"
+          - "apiKey 写入时 SHALL 仅经 _mask_secret 输出，绝不在 stdout 回显明文"
+      - id: "SC-002"
+        confidence: high
+        evidence: "proposal C1 幂等条款；设计 D1（同 id 已存在则更新 url/key 不重复创建）。"
+        given: "models.json 已存在同 id 且带 qoderFreeOwner 的 Custom 条目"
+        when: "再次调用 discover_qoder_free()"
+        then: "SHALL 更新该条目的 url/apiKey，不得创建第二条同 id 条目（数组长度不变）"
+        and:
+          - "若同 id 条目带非 qoderFreeOwner 的 owner（relayOwner/buddyBridgeOwner），SHALL 跳过不覆盖"
+      - id: "SC-003"
+        confidence: high
+        evidence: "proposal 约束『零阻断』+ 风险缓解（端点不可达静默跳过）；设计 D6。"
+        given: "Qoder-free 进程未启动（127.0.0.1:8210 不可达）"
+        when: "在 cmd_next / cmd_scan / relay qoder-free sync 中触发发现"
+        then: "SHALL 静默跳过（不抛异常、非零退出、不污染 stdout），relay 正常返回既有模型"
+        and:
+          - "SHALL 不向 stdout 输出任何错误；stderr 仅可有 debug 级信息"
+      - id: "SC-004"
+        confidence: high
+        evidence: "proposal 约束『零阻断』+ 配置路径可配置；设计 D5/D6。"
+        given: "Qoder-free config.json 路径不存在或文件非法"
+        when: "触发发现"
+        then: "SHALL 静默跳过（不抛异常、不写 models.json），relay 流程不受影响"
+        and:
+          - "SHALL 支持 QODER_FREE_CONFIG 环境变量 / qoder_free.config_path 配置键覆盖默认路径"
+
+  - id: "REQ-DISCOVER-002"
+    description: "发现逻辑通过 TTL 缓存自动触发于 scan/next 冷路径，避免每次联网"
+    scenarios:
+      - id: "SC-005"
+        confidence: medium
+        evidence: "proposal C1 自动触发（TTL 默认 60s）；设计 D2。"
+        given: "STATE_FILE 中 qoder_free_last_discovery 时间戳距今 < 60s"
+        when: "连续两次 cmd_next 调用（间隔 < TTL）"
+        then: "SHALL 仅在首次触发一次网络探测，第二次在 TTL 内 SHALL NOT 再次联网（probe 调用计数 = 1）"
+        and:
+          - "TTL 过期后（> 60s）的下一次调用 SHALL 重新探测一次"
+      - id: "SC-006"
+        confidence: medium
+        evidence: "proposal C1（接入 scan）；设计 D2。"
+        given: "Qoder-free 已启动且 TTL 已过期"
+        when: "执行 relay scan"
+        then: "SHALL 在扫描新增/移除模型前先执行一次发现，使新发现的 Qoder-free 模型被纳入 known_models"
+
+  - id: "REQ-ORIGINS-001"
+    description: "origins 命令将 qoderFreeOwner 条目归类为独立的 qoder-free 源"
+    scenarios:
+      - id: "SC-007"
+        confidence: high
+        evidence: "proposal C2 + 风险缓解（沿用 endswith('Owner') 精确判定）；pick_model.py L3463（KNOWN_EXTERNAL_OWNERS）、L1994-2017（_detect_source_tool）、L2056（free_semantics）。"
+        given: "某 data-root 的 models.json 含带 qoderFreeOwner:\"qoder-free\" 的 Custom 条目"
+        when: "执行 relay origins"
+        then: "SHALL 将该 root 的 tool 归因为 \"qoder-free\"，tool_detail 为 \"Qoder-free\""
+        and:
+          - "该源的 free_semantics SHALL 为 \"quota(third-party-managed)\""
+          - "SHALL NOT 被误判为 relay / ow-bridge / external"
+
+  - id: "REQ-POOL-001"
+    description: "Qoder-free 模型默认进入免费候选池（单聚合源，无 allowlist 勾选要求）"
+    scenarios:
+      - id: "SC-008"
+        confidence: high
+        evidence: "proposal C3 + SC4；pick_model.py L1596-1599（Custom 全量纳入）、L1661-1662（Custom default_free=True）。"
+        given: "models.json 含带 qoderFreeOwner 的 Custom 条目，且用户未做任何 allowlist 勾选"
+        when: "执行 relay inventory 与 relay next --source auto（或 custom）"
+        then: "SHALL 在 inventory 的 declared 模型中列出该条目（default_free=True），且 next SHALL 可在不勾选 allowlist 的情况下返回它"
+        and:
+          - "next 返回的 recommended_prefix SHALL 为 \"custom-local:\"（_source=custom 路径）"
+
+  - id: "REQ-SEC-001"
+    description: "Qoder-free 接入后，对外可分享输出（policy 快照 / list / inventory / profile）零 apiKey 明文泄漏"
+    scenarios:
+      - id: "SC-009"
+        confidence: high
+        evidence: "proposal 约束『零密钥泄漏』+ C4/TC-QF-005（复用 INT-005 守门）；pick_model.py SC-MO-012（apiKey_masked）。"
+        given: "models.json 含带 qoderFreeOwner 且 apiKey 为真实密钥的 Custom 条目"
+        when: "执行任何对外输出命令（list / inventory / profile / origins / policy 快照）"
+        then: "SHALL NOT 在任何 stdout 输出中出现 apiKey 明文"
+        and:
+          - "apiKey SHALL 仅以 _mask_secret 后的遮蔽形态出现（如 ****）或完全不出现"
