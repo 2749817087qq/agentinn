@@ -1,0 +1,83 @@
+# spec.yaml — 行为规格（Canonical YAML）
+# Change: relay-v560-daily-free-confirm
+# 配套 proposal: canonical/proposals/2026-10-12-relay-v560-daily-free-confirm.yaml
+
+meta:
+  capability: "free-daily-confirm"
+  change_id: "2026-10-12-relay-v560-daily-free-confirm"
+  created: "2026-10-12T20:00:00+08:00"
+  confidence: high
+
+requirements:
+  - id: "REQ-DFC-001"
+    description: "free confirm-status 命令以自然日口径返回每日闸判定 {due, confirmed_at, confirmed_date, today}"
+    scenarios:
+      - id: "SC-001"
+        confidence: high
+        evidence: "proposal C1；design.md D2/D3；pick_model.py L1790-1819（free_allowlist 存储）。"
+        given: "state 中 free_allowlist 缺失或 confirmed_at 为 None（从未确认）"
+        when: "执行 free confirm-status"
+        then: "SHALL 返回 due=true，confirmed_at=null，confirmed_date=null，today=<本地今天 YYYY-MM-DD>"
+        and:
+          - "state SHALL 为 unset，count SHALL 为 0"
+          - "命令 SHALL 为只读，不修改 state 任何字段"
+      - id: "SC-002"
+        confidence: high
+        evidence: "proposal C1；design.md D1（本地自然日比较）。"
+        given: "free_allowlist.confirmed_at 的本地日期 == 今天本地自然日"
+        when: "执行 free confirm-status（now 注入为当天）"
+        then: "SHALL 返回 due=false，confirmed_date == today"
+        and:
+          - "confirmed_at SHALL 原样回显（本地 ISO 字符串）"
+      - id: "SC-003"
+        confidence: high
+        evidence: "proposal C1；design.md D1（跨天到期）。"
+        given: "free_allowlist.confirmed_at 的本地日期 != 今天本地自然日（如昨天）"
+        when: "执行 free confirm-status（now 注入为今天）"
+        then: "SHALL 返回 due=true，confirmed_date != today"
+      - id: "SC-004"
+        confidence: high
+        evidence: "proposal 约束 + design.md D5（脏数据防御）。"
+        given: "free_allowlist.confirmed_at 为无法解析的脏字符串（如 not-a-date）"
+        when: "执行 free confirm-status"
+        then: "SHALL 返回 due=true（按未确认处理），且 confirmed_at SHALL 保留原始脏值回显"
+        and:
+          - "SHALL NOT 抛异常或非零退出"
+
+  - id: "REQ-DFC-002"
+    description: "next 与 inventory 输出透传 free_confirm_due 布尔（等于每日闸 due）"
+    scenarios:
+      - id: "SC-005"
+        confidence: high
+        evidence: "proposal C1；design.md D4；pick_model.py L2191（cmd_next 取 allowlist_meta）、L1943（cmd_inventory 取 meta）、L2330-2359/L1962-1973（输出 JSON）。"
+        given: "free_allowlist 为 unset（ids 空 / confirmed_at None）"
+        when: "执行 inventory 或 next"
+        then: "输出 JSON SHALL 含 free_confirm_due=true"
+        and:
+          - "inventory 的 free_allowlist.confirmed_at SHALL 为 null"
+      - id: "SC-006"
+        confidence: high
+        evidence: "proposal C1；design.md D1/D4。"
+        given: "free_allowlist 已确认且 confirmed_at 本地日期 == 今天"
+        when: "执行 inventory 或 next（now 注入为今天）"
+        then: "输出 JSON SHALL 含 free_confirm_due=false"
+
+  - id: "REQ-DFC-003"
+    description: "free set / free clear 维护每日闸语义（set 重置当日已确认，clear 使次日重新到期）"
+    scenarios:
+      - id: "SC-007"
+        confidence: high
+        evidence: "pick_model.py L2157-2166（free set 写 confirmed_at=now_utc()）；design.md D2。"
+        given: "free_allowlist 此前 unset"
+        when: "执行 free set --ids <valid-id>（now 注入为今天）后紧接 free confirm-status"
+        then: "confirm-status SHALL 返回 due=false（set 即时重置当日已确认）"
+        and:
+          - "next / inventory 的 free_confirm_due SHALL 为 false"
+      - id: "SC-008"
+        confidence: high
+        evidence: "pick_model.py L2110-2125（free clear 清 confirmed_at=None）；design.md D2。"
+        given: "free_allowlist 此前已确认（confirmed_at 为今天）"
+        when: "执行 free clear 后紧接 free confirm-status"
+        then: "confirm-status SHALL 返回 due=true（clear 后下次触发重新到期）"
+        and:
+          - "state SHALL 变回 unset"

@@ -1,0 +1,9 @@
+designs: {}
+proposals:
+  2026-10-12-relay-v560-daily-free-confirm: proposals/2026-10-12-relay-v560-daily-free-confirm.yaml
+specs:
+  agent:
+    2026-10-12-relay-v560-daily-free-confirm: specs/agent/2026-10-12-relay-v560-daily-free-confirm.yaml
+  code:
+    2026-10-12-relay-v560-daily-free-confirm: specs/code/2026-10-12-relay-v560-daily-free-confirm.yaml
+version: '2.9'

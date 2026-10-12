@@ -1,0 +1,58 @@
+# proposal.yaml — Canonical 格式（AI 起草、AI 修改、AI 消费）
+# V2.7 引入，与 proposal.md (Human View) 并存
+
+meta:
+  change_id: ""                # 与 changes/<name>/ 目录名一致
+  title: ""                    # 变更标题
+  created: ""                  # ISO 8601 时间戳
+  status: draft                # draft | confirmed | in_progress | completed
+
+why:
+  problem: ""                  # 问题陈述
+  motivation: ""               # 为什么现在做
+  evidence:                    # 证据块（TC-EPR-001：两字段必填非空）
+    observed_at: "2026-01-01T00:00:00+00:00"   # 观测时刻（带时区；不得用生成时刻冒充采集时刻）
+    observed_base_git_sha: "TODO-观测时-HEAD"    # 观测时的 git HEAD
+    details: ""                # 证据细节（实测数据 / 命令与输出摘要）
+
+what_changes:
+  - id: C1
+    description: ""            # 变更描述
+    type: new                  # new | modified | removed
+
+capabilities:
+  new:
+    - name: ""                 # capability 名称
+      description: ""          # 描述
+  modified:
+    - name: ""
+      description: ""
+
+constraints:
+  - ""
+
+stakeholders:
+  - ""
+
+risk_areas:
+  - capability: ""             # capability 名称
+    risk: ""                   # 风险描述
+    mitigation: ""             # 缓解措施
+
+non_goals:
+  - ""
+
+critical:
+  is_critical: false
+  risk_assessment:
+    safety_critical: false
+    financial: false
+    cross_system: false
+
+anchoring:
+  level: L1                    # L1 | L2 | L3 | L4
+  reference_changes: []        # L3 时引用
+  anchor_implementations: []   # L4 时引用
+
+success_criteria:
+  - ""

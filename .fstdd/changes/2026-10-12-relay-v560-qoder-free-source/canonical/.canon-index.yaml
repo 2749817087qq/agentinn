@@ -1,0 +1,9 @@
+designs: {}
+proposals:
+  2026-10-12-relay-v560-qoder-free-source: proposals/2026-10-12-relay-v560-qoder-free-source.yaml
+specs:
+  agent:
+    2026-10-12-relay-v560-qoder-free-source: specs/agent/2026-10-12-relay-v560-qoder-free-source.yaml
+  code:
+    2026-10-12-relay-v560-qoder-free-source: specs/code/2026-10-12-relay-v560-qoder-free-source.yaml
+version: '2.9'

@@ -1,0 +1,118 @@
+# spec.yaml — 行为规格（Canonical YAML）
+# Change: relay-v560-unified-onboarding
+# 配套 proposal: canonical/proposals/2026-10-12-relay-v560-unified-onboarding.yaml
+
+meta:
+  capability: "unified-onboarding"
+  change_id: "2026-10-12-relay-v560-unified-onboarding"
+  created: "2026-10-12T20:45:00+08:00"
+  confidence: high
+
+requirements:
+  - id: "REQ-UOB-001"
+    description: "onboard（读）一次性汇总统一向导数据：系统模型（含宿主时段·只读）+ 自定义/桥接模型（含扫描预填）+ AgentHub"
+    scenarios:
+      - id: "SC-001"
+        confidence: high
+        evidence: "proposal C1/C2；design.md D1/D2；pick_model.py _per_model_window_view L507、PLATFORM_MODELS、load_declared_models。"
+        given: "临时 HOME 下有 models.json（含平台模型 + 自定义/桥接模型）"
+        when: "执行 onboard（无参数，读）"
+        then: "SHALL 输出 JSON，含 system_models 数组（每条含宿主时段 start_hour/end_hour）、custom_models 数组、agenthub 对象"
+        and:
+          - "system_models 每条 SHALL 标注只读（read_only=true 或等价字段）"
+          - "SHALL NOT 修改任何 state 或 models.json（只读命令）"
+      - id: "SC-002"
+        confidence: high
+        evidence: "proposal C-SCAN-1 + 用户『桥接的也能扫描有没有免费时间段』；design.md D2。"
+        given: "存在桥接模型（origins 识别为 qoder-free / ow-bridge）"
+        when: "执行 onboard（读）"
+        then: "SHALL 尝试扫描桥接模型的免费时段；扫到则 custom_models 对应条目的时段预填为扫描结果"
+        and:
+          - "桥接端点不可达时 SHALL 静默回落 all-day，不抛异常、不阻断向导"
+          - "扫不到的纯 BYOK 模型 SHALL 默认 all-day"
+
+  - id: "REQ-UOB-002"
+    description: "onboard set（写）落盘：仅自定义/桥接模型写 window 覆写 + free_allowlist + state.relay_onboard"
+    scenarios:
+      - id: "SC-003"
+        confidence: high
+        evidence: "proposal C2/C-WIN-1；design.md D3；pick_model.py _write_override_window、cmd_window_set L4073。"
+        given: "向导结果为 {groups, custom_periods, agenthub_pref}"
+        when: "执行 onboard set（带向导结果）"
+        then: "SHALL 对每个自定义/桥接模型写逐模型 window 覆写（_write_override_window，model_id=mid），并写 free_allowlist 与 state.relay_onboard"
+        and:
+          - "state.relay_onboard SHALL 含 {confirmed_at, groups, custom_periods, agenthub_pref}"
+          - "all_day 模型 SHALL 写 {start_hour:0,end_hour:0}（恒真语义）"
+      - id: "SC-004"
+        confidence: high
+        evidence: "proposal C-WIN-1（系统模型用宿主规范）；design.md D1/D3 + R-SYS。"
+        given: "向导结果中包含系统模型（_source=platform）"
+        when: "执行 onboard set"
+        then: "SHALL NOT 为系统模型写 window 覆写（宿主程序规范为准）"
+        and:
+          - "系统模型的时段写入 SHALL 被跳过，且不报错"
+
+  - id: "REQ-UOB-003"
+    description: "onboard-status 的 due 判定 = 未确认 或 跨自然日 或 数据漂移"
+    scenarios:
+      - id: "SC-005"
+        confidence: high
+        evidence: "proposal C2；design.md D4；吸收 daily-free-confirm。"
+        given: "state.relay_onboard 缺失（从未确认）"
+        when: "执行 onboard-status"
+        then: "SHALL 返回 due=true，confirmed_at=null"
+      - id: "SC-006"
+        confidence: high
+        evidence: "design.md D4（自然日 + hash）。"
+        given: "relay_onboard.confirmed_at 为今天本地自然日，且 last_config_hash == 当前配置 hash"
+        when: "执行 onboard-status（now 注入为当天）"
+        then: "SHALL 返回 due=false，drift_detected=false"
+      - id: "SC-007"
+        confidence: high
+        evidence: "design.md D4（跨天）。"
+        given: "relay_onboard.confirmed_at 为昨天本地自然日"
+        when: "执行 onboard-status（now 注入为今天）"
+        then: "SHALL 返回 due=true"
+      - id: "SC-008"
+        confidence: high
+        evidence: "design.md D4（数据漂移）+ R-HASH。"
+        given: "relay_onboard.confirmed_at 为今天，但 last_config_hash != 当前配置 hash（如新增免费模型）"
+        when: "执行 onboard-status"
+        then: "SHALL 返回 due=true，drift_detected=true"
+
+  - id: "REQ-UOB-004"
+    description: "next / inventory 透传 onboard_due 布尔"
+    scenarios:
+      - id: "SC-009"
+        confidence: high
+        evidence: "proposal C2；design.md D4；pick_model.py cmd_next L2176 / cmd_inventory L1932。"
+        given: "relay_onboard 未确认（due=true）"
+        when: "执行 next 或 inventory"
+        then: "输出 JSON SHALL 含 onboard_due=true"
+        and:
+          - "relay_onboard 已确认当天且同 hash 时 SHALL 为 false"
+
+  - id: "REQ-UOB-005"
+    description: "存量迁移：free_allowlist + 自定义模型 window 覆写 → relay_onboard，旧键保留只读"
+    scenarios:
+      - id: "SC-010"
+        confidence: high
+        evidence: "proposal C-MIG-1；design.md D5。"
+        given: "存量 state 含 free_allowlist={ids} 与某自定义模型的 window 覆写"
+        when: "执行 onboard（读）或 onboard-status（触发迁移派生）"
+        then: "SHALL 派生出 relay_onboard.groups（按扫描器分类）与 custom_periods"
+        and:
+          - "free_allowlist 旧键 SHALL 保留（只读，不删除）"
+          - "脏数据（confirmed_at 缺失/ids 非法）SHALL 降级为空但不报错"
+
+  - id: "REQ-UOB-006"
+    description: "AgentHub 双层：偏好与开通完成态分离存储"
+    scenarios:
+      - id: "SC-011"
+        confidence: high
+        evidence: "proposal C-AGHUB-1；design.md D6；R-AGHUB。"
+        given: "向导中 AgentHub 偏好 toggle = 开"
+        when: "执行 onboard set"
+        then: "SHALL 写 state.relay_onboard.agenthub_pref=true"
+        and:
+          - "SHALL NOT 因偏好为真就写 agenthub_onboarded=true（开通完成态只由 multihub-node-onboarding 写）"

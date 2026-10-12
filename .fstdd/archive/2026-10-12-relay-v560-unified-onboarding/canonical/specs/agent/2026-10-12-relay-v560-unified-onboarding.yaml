@@ -1,0 +1,88 @@
+# agent_spec.yaml — Agent 验证规格（Canonical YAML）
+# Change: relay-v560-unified-onboarding
+# coding 任务：CP 检查点对应 spec.yaml 的 Scenario，assertions 对应 THEN
+
+meta:
+  task_id: "verify-relay-v560-unified-onboarding"
+  change_id: "2026-10-12-relay-v560-unified-onboarding"
+  task_type: code
+  system: "free-model-relay pick_model.py（~/.workbuddy-ai 开发副本，同步至 ~/.workbuddy 权威副本）；被测 = cmd_onboard(读) / cmd_onboard_set(写) / cmd_onboard_status / _onboard_due / migrate_to_relay_onboard / cmd_next / cmd_inventory；文档 = SKILL.md relay-onboarding-wizard 块、relay_instruction.md Step 0"
+  preconditions:
+    - "测试以 importlib 加载被测 pick_model.py；HOME 指向临时目录隔离，不触碰真实 models.json / state"
+    - "日期断言一律 monkeypatch now_utc 注入，不依赖真实墙上时钟"
+    - "桥接扫描用注入探针（_probe），不触网；被测脚本输出仅 ASCII"
+
+steps:
+  - id: "CP-1"
+    description: "SC-001 onboard（读）汇总系统/自定义模型 + AgentHub，系统模型标只读"
+    action: "临时 HOME 写含平台+自定义模型的 models.json；执行 onboard"
+    assertions:
+      - type: stdout_contains
+        expected: "system_models"
+      - type: stdout_contains
+        expected: "custom_models"
+      - type: stdout_contains
+        expected: "agenthub"
+  - id: "CP-2"
+    description: "SC-002 桥接模型尝试扫描免费时段（扫到预填 / 不可达回落 all-day）"
+    action: "注入桥接探针返回时段；再注入不可达探针，两次执行 onboard"
+    assertions:
+      - type: exit_code
+        expected: 0
+      - type: stdout_contains
+        expected: "custom_models"
+  - id: "CP-3"
+    description: "SC-003 onboard set 写自定义模型 window 覆写 + free_allowlist + relay_onboard"
+    action: "执行 onboard set（含自定义模型时段）；读 override 文件与 state"
+    assertions:
+      - type: file_contains
+        expected: "relay_onboard"
+  - id: "CP-4"
+    description: "SC-004 系统模型跳过 window 写入"
+    action: "onboard set 结果含系统模型；读 override 文件确认无系统模型条目"
+    assertions:
+      - type: exit_code
+        expected: 0
+  - id: "CP-5"
+    description: "SC-005/006/007/008 due 判定四态"
+    action: "分别构造 未确认 / 当天同hash / 跨天 / hash漂移 四态，执行 onboard-status"
+    assertions:
+      - type: stdout_contains
+        expected: "due"
+  - id: "CP-6"
+    description: "SC-009 next/inventory 透传 onboard_due"
+    action: "未确认态执行 inventory 与 next"
+    assertions:
+      - type: stdout_contains
+        expected: "onboard_due"
+  - id: "CP-7"
+    description: "SC-010 存量迁移（free_allowlist + window → relay_onboard，旧键保留）"
+    action: "写存量 state；执行 onboard 读；读 state 确认旧键仍在"
+    assertions:
+      - type: stdout_contains
+        expected: "groups"
+  - id: "CP-8"
+    description: "SC-011 AgentHub 双层（偏好写入但不写开通完成态）"
+    action: "onboard set 带 agenthub_pref=true；读 state 确认 agenthub_onboarded 未置真"
+    assertions:
+      - type: file_contains
+        expected: "agenthub_pref"
+  - id: "CP-9"
+    description: "C1 文档：SKILL.md 含 relay-onboarding-wizard 块 + 旧 relay-window-wheel 保留 fallback"
+    action: "grep SKILL.md 确认新块标记与旧块共存"
+    assertions:
+      - type: file_contains
+        expected: "relay-onboarding-wizard:start"
+      - type: file_contains
+        expected: "relay-window-wheel:start"
+  - id: "CP-10"
+    description: "C2 回归：test-free-model-confirm.py 旧文案断言同步更新后通过"
+    action: "运行回归 tests/test-free-model-confirm.py"
+    assertions:
+      - type: exit_code
+        expected: 0
+
+expected_outcomes:
+  - "onboard 读/写、onboard-status due 判定、next/inventory 透传、迁移、AgentHub 双层全部通过"
+  - "系统模型时段只读、自定义/桥接模型逐模型可调、桥接扫描不阻断"
+  - "TC-UOB-001~011 全绿；旧 relay-window-wheel 保留 fallback；全量回归绿（除已知环境问题）"

@@ -1,0 +1,47 @@
+# spec.yaml — build_candidate_pool（Coding 行为规格）
+meta:
+  capability: "build_candidate_pool"
+  change_id: "relay-v550-program-cache-scanner"
+  created: "2026-10-11T15:30:00+08:00"
+  confidence: high
+
+requirements:
+  - id: REQ-001
+    description: "候选池默认只用程序侧免费/折扣模型裸 id，不含 custom-local: 前缀。"
+    scenarios:
+      - id: SC-001
+        confidence: high
+        evidence: "what_changes C2：'默认只用程序侧免费/折扣模型（裸 id：hy3 / hy4-preview / glm-5.2 / deepseek-v4 系）'；v5.5.0 用户定调：候选池默认只用程序侧免费/折扣模型裸 id"
+        given: "扫描器产出当前免费模型 [hy3, hy4-preview]（free_now=True）"
+        when: "调用 build_free_candidate_pool(now)"
+        then: "SHALL 返回裸 id 列表 ['hy3','hy4-preview']，元素不含 'custom-local:' 前缀"
+        and:
+          - "程序侧折扣模型（effective!=0）是否纳入由候选池配置决定，但 SHALL 同样用裸 id"
+      - id: SC-002
+        confidence: high
+        evidence: "what_changes C4：程序模型用裸 id；constraints：'分发物不内置模型条目'，扫描器只产出程序侧清单"
+        given: "扫描器产出的模型 id 为程序侧平台模型（如 'hy3'）"
+        when: "build_free_candidate_pool 组装候选集"
+        then: "SHALL 不拼接 'custom-local:' 前缀到程序侧 id"
+        and:
+          - "输出 JSON SHALL 含 recommended_prefix 字段，程序项为 ''（空）"
+
+  - id: REQ-002
+    description: "BYOK custom-local:* 仅作兜底，默认路线不含 BYOK。"
+    scenarios:
+      - id: SC-003
+        confidence: high
+        evidence: "what_changes C2：'BYOK custom-local:* 退出默认路径，仅作兜底路线'；risk_areas.build_candidate_pool：路线分离避免同名劫持"
+        given: "扫描器产出为空（当前无任何免费模型）"
+        when: "build_free_candidate_pool 回退到 load_declared_models()"
+        then: "SHALL 返回 BYOK 裸 id，并在结果中标注 source='byok_fallback'"
+        and:
+          - "调用方对 BYOK 兜底项 SHALL 加 'custom-local:' 前缀（与程序项区分）"
+      - id: SC-004
+        confidence: medium
+        evidence: "risk_areas.build_candidate_pool：'程序模型裸 id 与 BYOK custom-local:* 同名混淆，重蹈同名劫持覆辙'；缓解：路线分离"
+        given: "扫描器产出非空（含 hy3）且 models.json 中也声明了同名 BYOK 模型 'hy3'"
+        when: "build_free_candidate_pool 组装候选集"
+        then: "SHALL 优先采用扫描器的程序侧 hy3（裸 id），不将 BYOK 同名项混入默认候选集"
+        and:
+          - "默认路线 SHALL 零 BYOK 项（BYOK 仅兜底触发）"

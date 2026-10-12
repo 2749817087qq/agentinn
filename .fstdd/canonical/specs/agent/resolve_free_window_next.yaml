@@ -1,0 +1,35 @@
+# agent_spec.yaml — resolve_free_window / next（Agent 验证规格）
+meta:
+  task_id: "verify-resolve-free-window-next"
+  change_id: "relay-v550-program-cache-scanner"
+  task_type: code
+  system: "free-model-relay pick_model.py — 免费窗口与 next 输出"
+  preconditions:
+    - "扫描器可注入（monkeypatch scan_program_config）"
+    - "SKILL.md 当前版本可读取校验"
+
+steps:
+  - id: CP-1
+    description: "resolve_source 消费扫描器而非硬编码窗口（SC1）"
+    action: "resolve_source('auto') 在扫描器有免费模型时"
+    assertions:
+      - type: stdout_contains
+        expected: "all"
+  - id: CP-2
+    description: "next 输出程序模型裸 id（SC3）"
+    action: "cmd_next 选中 hy3，断言输出 id='hy3' 且 recommended_prefix=''"
+    assertions:
+      - type: stdout_contains
+        expected: "hy3"
+  - id: CP-3
+    description: "next 对 BYOK 兜底项给 custom-local 前缀提示（SC4）"
+    action: "cmd_next 选中 BYOK 兜底项，断言 recommended_prefix='custom-local:'"
+    assertions:
+      - type: stdout_contains
+        expected: "custom-local:"
+  - id: CP-4
+    description: "SKILL.md 无残留硬编码窗口（SC4/SC5）"
+    action: "grep SKILL.md 不应含 until=2026-10-10 与 23:00-08:00 统一窗口"
+    assertions:
+      - type: stdout_contains
+        expected: ""

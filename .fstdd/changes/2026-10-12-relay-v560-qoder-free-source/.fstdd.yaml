@@ -1,0 +1,45 @@
+baseline:
+  at: '2026-10-12T10:47:16+00:00'
+  base_git_sha: unversioned
+  clock_source: system
+  established_by: gate1
+  node_id: DESKTOP-1MEQDMR
+change_id: 2026-10-12-relay-v560-qoder-free-source
+complexity_score: null
+current_phase: build
+design_adjustments:
+  count: 0
+mode: standard
+long_range:
+  enabled: true
+  mode: full_auto
+  pre_auth_completed: true
+  pre_auth_timestamp: '2026-10-12T11:05:00+00:00'
+phases:
+  build:
+    status: pending
+  deliver:
+    status: pending
+  spec:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-12T10:57:59+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 用户在 2026-10-12 对话中通过 Gate 2 确认选项（『确认 Gate 2（推荐）』），批准锁定 design.md
+      + 行为规格（canonical specs/code + agent）+ test-plan，进入 Phase 3 实现 discover_qoder_free
+      / origins 归类 / TTL。
+    status: completed
+  understand:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-12T10:47:16+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 用户于 2026-10-12 18:42 在对话中回复『确认』，明确批准 Gate 1（UNDERSTAND 阶段）：将本地
+      Qoder-free 网关作为 OpenAI 兼容源接入 free-model-relay（v5.6.0 方向），默认进入免费候选池且自动发现。
+    status: completed
+score_confidence: null
+status: active
+task_type: code
+traceability:
+  spec_scenarios: 0
+  tc_cases: 0
+  test_functions: 0
+version: '3.0'

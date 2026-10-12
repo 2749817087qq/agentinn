@@ -1,0 +1,33 @@
+baseline:
+  at: '2026-10-12T12:05:30+00:00'
+  base_git_sha: unversioned
+  clock_source: system
+  established_by: gate1
+  node_id: DESKTOP-1MEQDMR
+change_id: 2026-10-12-relay-v560-daily-free-confirm
+complexity_score: null
+current_phase: understand
+design_adjustments:
+  count: 0
+mode: standard
+phases:
+  build:
+    status: pending
+  deliver:
+    status: pending
+  spec:
+    status: pending
+  understand:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-12T12:05:30+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: Please continue.
+    status: completed
+score_confidence: null
+status: aborted
+task_type: code
+traceability:
+  spec_scenarios: 0
+  tc_cases: 0
+  test_functions: 0
+version: '3.0'

@@ -1,0 +1,9 @@
+designs: {}
+proposals:
+  2026-10-12-relay-v560-unified-onboarding: proposals/2026-10-12-relay-v560-unified-onboarding.yaml
+specs:
+  agent:
+    2026-10-12-relay-v560-unified-onboarding: specs/agent/2026-10-12-relay-v560-unified-onboarding.yaml
+  code:
+    2026-10-12-relay-v560-unified-onboarding: specs/code/2026-10-12-relay-v560-unified-onboarding.yaml
+version: '2.9'

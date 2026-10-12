@@ -1,0 +1,43 @@
+# agent_spec.yaml — scan_program_config（Agent 验证规格）
+meta:
+  task_id: "verify-scan-program-config"
+  change_id: "relay-v550-program-cache-scanner"
+  task_type: code
+  system: "free-model-relay pick_model.py — 程序侧缓存扫描器"
+  preconditions:
+    - "双根缓存样例可构造（tmp 目录注入 acc-product-config-v3.json）"
+    - "now 可注入（monkeypatch now_utc 或直接传参）"
+
+steps:
+  - id: CP-1
+    description: "双根正常扫描产出免费/折扣清单（SC1/SC5/SC6）"
+    action: "scan_program_config(roots=[rootA, rootB], now=NIGHT) 对注入样例"
+    assertions:
+      - type: stdout_contains
+        expected: "hy3"
+      - type: stdout_contains
+        expected: "free_now"
+  - id: CP-2
+    description: "双根同 id 取更低 effective（SC2 保守合并）"
+    action: "构造 rootA 对某 id base x0.29、rootB base x0.00，调用并断言合并 effective"
+    assertions:
+      - type: stdout_contains
+        expected: "x0.00"
+  - id: CP-3
+    description: "单根缺失不静默空清单（SC4 降级一级）"
+    action: "roots=[missing, valid]，断言结果与 warnings 非空"
+    assertions:
+      - type: stdout_contains
+        expected: "warning"
+  - id: CP-4
+    description: "双根全失败回退 models.json freeWindow（SC5 降级二级）"
+    action: "roots=[missing, missing] 且 models.json 存在 freeWindow，断言回退生效"
+    assertions:
+      - type: stdout_contains
+        expected: "fallback"
+  - id: CP-5
+    description: "折扣模型 free_now=False（SC3 中间态）"
+    action: "构造 glm-5.2 夜间 0.50x，now 在窗内，断言 free_now=False 且 effective_credits 反映 0.5x"
+    assertions:
+      - type: stdout_contains
+        expected: "free_now"

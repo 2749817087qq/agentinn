@@ -1,0 +1,144 @@
+# proposal.yaml — Canonical 格式
+# Change: relay-v560-qoder-free-source
+# 状态：draft（待 Gate 1 确认）
+
+meta:
+  change_id: "relay-v560-qoder-free-source"
+  title: "free-model-relay v5.6.0：将本地 Qoder-free 网关作为 OpenAI 兼容源接入（自动发现 + 默认进免费池）"
+  created: "2026-10-12T18:30:00+08:00"
+  status: draft
+
+why:
+  problem: >
+    2026-10-12 已在本地开发机安装 Qoder-free v0.1.0（D:/tools/qoder-free），它把 Qoder 账号包装成标准
+    OpenAI 兼容端点（Base URL http://127.0.0.1:8210/v1，api_key 在 config.json），让被锁在 Qoder 客户端里的
+    免费/折扣模型能被任意 OpenAI 客户端调用。但 relay 当前只认 models.json 里带 *Owner 标记的 Custom 条目
+    （relay / ow-bridge / external），Qoder-free 的模型尚未进入 models.json，relay 无从调度——等于把已装好的
+    本地免费额度闲置，且每次都要手工 models add，易错、不可复现。
+  motivation: >
+    经代码核对：relay 的 load_models("custom") 把**所有** vendor=Custom 条目（不论 owner 标记）纳入候选池，
+    _source 一律置 "custom"；auto 源在免费时段扩到 all、收费时段回落 custom。即 Qoder-free 模型只要以 Custom 条目
+    建档，就**天然进入默认免费候选池**（与 OW Bridge 同口径）。relay 调度内核对 Custom 条目在 next 时一律走
+    custom-local: 前缀子代理，缺的仅是"探测端点并自动建档"这一步。复用既有候选池/配额/转发逻辑即可，无需 AI 端
+    代跑 OAuth 登录（Qoder GUI 登录与 qodercli 鉴权上下文独立，沙箱读不到 OS 凭据）。用户明确希望：Qoder-free
+    模型默认就进免费候选池，且要"自动发现"而非手动 sync。
+  evidence:
+    observed_at: "2026-10-12T18:25:00+08:00"
+    observed_base_git_sha: "relay 已装 v5.5.0（~/.workbuddy-ai/skills/free-model-relay）；Qoder-free 安装提交 c092402 (v0.1.0)"
+    details: >
+      2026-10-12 实测：Qoder-free v0.1.0 预编译 exe 下载并 sha256 校验通过
+      （e7a6570813d19f429d73959d0a06d847ea60125dd27a76791d37539c574d0190）；worker npm 依赖（钉版 qodercli 1.1.32）
+      安装成功；启动自检确认 (1) 自动生成 api_key 写回 config.json；(2) GET /v1/models 无 key→401、带 key→200
+      且返回标准 OpenAI 格式 {"data":[],"object":"list"}（待面板加账号后出现模型）；(3) 面板 :8210/panel 返回 200。
+      relay 侧代码核对（pick_model.py）：load_models("custom") 遍历 models.json、仅按 vendor=="Custom" 过滤并置
+      _source="custom"（L1596-1599）；resolve_source("auto") 免费时段→"all"、收费时段→"custom"（L1703-1704）；
+      cmd_next 对 _source=="custom" 项加 recommended_prefix="custom-local:"（L2318）。故 Qoder-free 只需以 Custom
+      条目建档即被现有调度链路接管，无需改池逻辑。
+
+what_changes:
+  - id: C1
+    description: >
+      新增自动发现能力 discover_qoder_free()：读取 Qoder-free 的 config.json（api_key 与可选 listen 地址），
+      探测 GET {base}/v1/models（带 Bearer api_key），把返回的模型逐个写成 models.json 的 Custom 条目，字段为
+      {id, vendor:"Custom", url:"http://127.0.0.1:8210/v1", apiKey:<QF key>, qoderFreeOwner:"qoder-free"}。
+      id 采用模型原始 id（保留 cn:/global: 区域前缀语义）。幂等：条目已存在则更新 url/key、不重复创建。
+      端点不可达 / config 缺失 / 返回空 data 时静默跳过（仅 warn，不抛异常、不阻断 relay 其它流程）。
+      **自动触发**：(a) 接入既有 scan 命令（scan_program_config 之外新增一步）；(b) 在 load_models / next 的
+      冷路径上做 TTL 缓存自动探测（默认 60s 重探一次，last_discovery 时间戳存于 relay state），避免每次 next 都
+      联网。另保留显式子命令 relay qoder-free sync（无视 TTL 强制刷新）与 relay qoder-free status（显示可达性 /
+      已发现模型数 / 上次探测时刻）供手动与排障。
+    type: new
+  - id: C2
+    description: >
+      在 KNOWN_EXTERNAL_OWNERS 增加 "qoderFreeOwner": "Qoder-free"，使 origins 命令将其归类为 qoder-free 源，
+      free_semantics 与 ow-bridge 同口径（quota(third-party-managed)）。
+    type: modified
+  - id: C3
+    description: >
+      默认进池 + 单一聚合源治理：Qoder-free 条目为 vendor=Custom，天然进入候选池（与 ow-bridge 同口径），
+      无需用户显式 opt-in。relay 仅把 Qoder-free 当**单一聚合端点源**暴露——它自身已含多账号加权选号、会话粘性、
+      限流冷却、连败熔断、单账号并发与单次轮换；relay 不对其叠加账户级二次轮换/熔断（避免双重调度）。模型级选择
+      （next 在多个 qoder-free 模型 id 间轮询）仍按既有候选池逻辑，属正常模型选择而非账户调度。
+    type: modified
+  - id: C4
+    description: >
+      新增测试：TC-QF-001 探测成功→写 Custom 条目（含 qoderFreeOwner/url/apiKey）；TC-QF-002 端点不可达→跳过不报错；
+      TC-QF-003 origins 把 qoderFreeOwner 归类为 Qoder-free 源；TC-QF-004 模型进入 inventory 且默认 next
+      （--source auto/custom）即可返回它们（无需 allowlist 勾选）；TC-QF-005 policy 快照仍不含 apiKey（零泄漏，
+      复用 INT-005 守门）；TC-QF-006 TTL 缓存——连续两次 next 之间不重复联网探测（last_discovery 时间戳生效）。
+    type: new
+
+capabilities:
+  new:
+    - name: "discover_qoder_free"
+      description: "探测本地 Qoder-free 网关 /v1/models，将其模型以 Custom 条目（带 qoderFreeOwner 标记）幂等写入 models.json；端点不可达时静默跳过。支持 scan 接入 + TTL 缓存自动触发 + 显式 sync/status 子命令。"
+  modified:
+    - name: "origins 来源归类"
+      description: "KNOWN_EXTERNAL_OWNERS 增加 qoderFreeOwner→Qoder-free，origins 命令将此类条目归类为 Qoder-free 源（third-party-managed 语义）。"
+
+constraints:
+  - "默认进池：Qoder-free 条目为 vendor=Custom，天然纳入候选池（与 ow-bridge 同口径）；不要求用户显式勾选 allowlist。"
+  - "零阻断：Qoder-free 未启动 / 未加账号 / config 缺失时，发现逻辑静默跳过或仅告警，绝不导致 relay next/inventory/scan 报错或变慢（TTL 缓存保证 next 热路径不每次联网）。"
+  - "零密钥泄漏：Qoder-free api_key 仅在本地 models.json 落盘（与既有 custom 条目同口径）；policy 快照继续剥离 apiKey（INT-005）。"
+  - "配置路径可配置：Qoder-free config.json 路径默认 D:/tools/qoder-free/config.json（Windows）/ ~/qoder-free/config.json（其它），可被环境变量 QODER_FREE_CONFIG 或 relay 配置键 qoder_free.config_path 覆盖；listen 地址同理可被 QODER_FREE_BASE 覆盖。"
+  - "单聚合源、不双重调度：relay 不对 Qoder-free 叠加账户级轮换/熔断（避免与 Qoder-free 自身多账号调度叠加导致抖动/误熔断）；仅做模型级选择。"
+  - "复用既有 *Owner 所有权判定（键名以 Owner 结尾、大小写敏感、子串误判防护），不破坏 ow-bridge / relay 既有分类。"
+  - "延续分发物安全：install.sh / SKILL.md 不内置任何 Qoder-free 模型条目与密钥；发现由本机 relay 运行时执行。"
+  - "id 含区域前缀（cn:/global:）时，确认 relay 子代理 model 参数 custom-local:<id> 与 models.json 条目 id 精确匹配；若平台拒绝冒号 id，则在建档时做可逆 sanitize 并在 origins/next 输出还原（列为 Phase 2/3 验证项）。"
+
+stakeholders:
+  - "relay 用户：能否低摩擦把本地 Qoder-free 额度自动纳为默认可用免费源。"
+  - "Qoder-free（本机网关）：仅被动提供 OpenAI 兼容端点，不被 relay 修改。"
+  - "本机多根环境：WorkBuddy 根与 WorkBuddy AI 根 models.json 同步适配（沿用 v5.5.0 数据根多根逻辑）。"
+
+risk_areas:
+  - capability: "discover_qoder_free"
+    risk: "Qoder-free 未启动 / config 路径不对 / 返回空 → 探测失败；若每次 next 都联网探测会拖慢热路径且易抖动。"
+    mitigation: "TTL 缓存（默认 60s 重探）保证 next 热路径不每次联网；任何失败分支走 warn+跳过，不向上抛异常。"
+  - capability: "discover_qoder_free"
+    risk: "apiKey 落 models.json 后，policy 快照或日志误带 key 会泄漏。"
+    mitigation: "约束：policy 快照继续走 INT-005 剥离；models.json 本就是本地凭证文件（与 ow-bridge 同口径）；TC-QF-005 守门。"
+  - capability: "origins 来源归类"
+    risk: "qoderFreeOwner 未注册或被子串判据误判为 relayOwner（buddyBridgeOwner 的历史坑）。"
+    mitigation: "C2 + 沿用 _owner_marker_keys 的 endswith('Owner') 精确判定；TC-QF-003 断言分类正确。"
+  - capability: "单聚合源治理"
+    risk: "relay 对 qoder-free 再加一层账户级轮换/熔断，与 Qoder-free 自身调度叠加导致抖动或误熔断。"
+    mitigation: "C3：qoder-free 条目仅作模型级候选，relay 不引入账户级二次调度；其多账号治理完全交给 Qoder-free 端点。"
+  - capability: "id 区域前缀"
+    risk: "qoder-free 模型 id 含 cn:/global: 冒号，relay 子代理 model 参数 custom-local:<id> 可能因冒号无法精确匹配 models.json 条目。"
+    mitigation: "约束末条：Phase 2/3 实测；若平台拒绝冒号 id 则建档时可逆 sanitize 并在输出还原。"
+
+non_goals:
+  - "不实现/修改 Qoder-free 自身的多账号调度、登录、面板——那是 Qoder-free 的职责，relay 只消费其端点。"
+  - "不自动启动或健康检查 Qoder-free 进程（启动与设备登录由用户在本机面板完成）。"
+  - "不在此 change 改变平台侧模型或程序侧免费窗口逻辑（沿用 v5.5.0 扫描器）。"
+  - "不跨机器同步 qoder-free 凭据（凭据仅本机，符合分发物安全约定）。"
+  - "不改写既有 ow-bridge / relay 自有 Custom 条目的处理口径（仅新增 qoderFreeOwner 一类）。"
+
+critical:
+  is_critical: false
+  risk_assessment:
+    safety_critical: false
+    financial: false
+    cross_system: false
+
+anchoring:
+  level: L2
+  reference_changes:
+    - "relay-v550-program-cache-scanner"
+  anchor_implementations:
+    - "OW Bridge 接入模式：KNOWN_EXTERNAL_OWNERS 的 buddyBridgeOwner 归类与 external 源处理（pick_model.py:3463, 2008-2016）"
+    - "models add 的 Custom 条目写入格式与 *Owner 所有权判定（pick_model.py:3734-3742, 3458-3474）"
+    - "load_models 的 vendor=Custom 全量纳入与 _source 赋值（pick_model.py:1596-1599）"
+    - "cmd_next 对 custom 源加 custom-local: 前缀转发（pick_model.py:2318）"
+
+success_criteria:
+  - "SC1：relay qoder-free sync（或 scan）在 Qoder-free 已启动且已加账号时，能把 /v1/models 返回的模型写成 models.json 的 Custom 条目，且每条含 qoderFreeOwner、url=http://127.0.0.1:8210/v1、apiKey=<QF key>。"
+  - "SC2：Qoder-free 未启动或 config 缺失时，relay qoder-free sync/scan/next 静默跳过（仅 warn），不抛异常、不导致 relay inventory/next 失败或显著变慢。"
+  - "SC3：relay origins 把带 qoderFreeOwner 的条目归类为 Qoder-free 源，free_semantics 为 quota(third-party-managed)。"
+  - "SC4：qoder-free 模型出现在 relay inventory（vendor=Custom），且在默认 relay next（--source auto/custom，无 allowlist 勾选）即可被返回进入候选——即默认进免费候选池。"
+  - "SC5：以 qoder-free 模型启动子代理时，relay next 返回 custom-local:<id>，且请求经 models.json url 路由到 127.0.0.1:8210/v1（端到端打通）。"
+  - "SC6：TC-QF-001~006 全绿（发现写条目 / 不可达跳过 / origins 归类 / 默认进池 / 快照零泄漏 / TTL 缓存不重复联网）。"
+  - "SC7：Qoder-free config.json 路径可被 QODER_FREE_CONFIG / qoder_free.config_path 覆盖，relay 在默认路径与覆盖路径下均可发现。"
+  - "SC8：两根（~/.workbuddy 与 ~/.workbuddy-ai）models.json 同步适配，qoder-free 条目在两根均被正确识别与归类，且与 v5.5.0 双根同步纪律一致。"
+  - "SC9：id 含 cn:/global: 区域前缀时，子代理 model 参数 custom-local:<id> 能精确命中 models.json 条目（若平台拒冒号 id，sanitize+还原方案通过 Phase 2/3 验证）。"

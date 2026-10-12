@@ -1,0 +1,14 @@
+by_category:
+  context_loss:
+  - EXP-2026-0001
+by_language:
+  python:
+  - EXP-2026-0001
+by_lifecycle:
+  discovered:
+  - EXP-2026-0001
+by_severity:
+  high:
+  - EXP-2026-0001
+last_id: 1
+total: 1

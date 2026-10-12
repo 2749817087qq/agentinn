@@ -1,0 +1,118 @@
+# proposal.yaml — Canonical 格式
+# Change: relay-v560-daily-free-confirm
+# 状态：draft（待 Gate 1 确认）
+
+meta:
+  change_id: "relay-v560-daily-free-confirm"
+  title: "free-model-relay v5.6.0：免费模型确认改为「每天一次」（自然日 + 代码级每日闸）"
+  created: "2026-10-12T18:50:00+08:00"
+  status: draft
+
+why:
+  problem: >
+    当前免费模型显式确认（SKILL.md「免费模型显式确认（Step 0 第 ②~⑤ 步）」/ relay_instruction.md「0.
+    确认免费模型」）在**每次触发**都弹窗确认（SKILL.md L262「每次触发都弹窗确认」、relay_instruction.md
+    L23「每次触发都做」），即便白名单（哪些模型算免费）已持久化在 state 的 free_allowlist.confirmed_at。
+    前序 relay-v560-qoder-free-source 让更多模型默认进池后，每触发确认的摩擦被放大：一个 change 有 3 个委派点
+    就会弹 3 次。用户希望把确认节奏从「每触发一次」降为「每天一次」。
+  motivation: >
+    用户于 2026-10-12 明确：「取消免费模型的每次使用确认，就每天进行一次确认就行了」。改为每日闸既能保住「免费模型
+    由用户显式确认」这一安全边界（哪些模型免费是用户-owned 决策），又消除每触发的摩擦。白名单内容本身仍持久化，
+    仅 re-prompt 节奏变化。
+  evidence:
+    observed_at: "2026-10-12T18:10:00+08:00"
+    observed_base_git_sha: "relay 已装 v5.5.0+（~/.workbuddy-ai/skills/free-model-relay）；前序 relay-v560-qoder-free-source 已代码就绪待 Gate 3"
+    details: >
+      代码与文档核对（pick_model.py + SKILL.md + relay_instruction.md）：
+      (1) SKILL.md L262「确认时机 | 每次触发都弹窗确认（不落「一次性开关」）」明确当前为每触发确认；
+      (2) relay_instruction.md L23「### 0. 确认免费模型（每次触发都做，先于选模型）」；
+      (3) free_allowlist 已持久化 confirmed_at（ISO 时间戳），见 pick_model.py free set / load_free_allowlist；
+      (4) 前序 Qoder-free 自动发现使更多模型默认进池 → 每触发确认摩擦放大，正是本次诉求的触发点。
+
+what_changes:
+  - id: C1
+    description: >
+      新增「每日闸」判定：以 free_allowlist.confirmed_at 的**本地自然日** 与 今天本地自然日 比较，决定 Step 0 ②
+      是否仍需弹窗。新增命令 `free confirm-status` 返回 {due: bool, confirmed_at, confirmed_date, today}，供 AI 在
+      Step 0 ② 前调用；next / inventory 的 JSON 同步附带 free_confirm_due 字段（避免额外一次调用）。同日（本地
+      自然日）内已确认过 → due=false，跳过 re-prompt；跨自然日 → due=true，重新弹窗确认并由 free set 更新
+      confirmed_at。旧 state 无 confirmed_at 或 allowlist 未确认 → due=true（等同现状，向后兼容）。
+    type: new
+  - id: C2
+    description: >
+      更新文档约定：SKILL.md「免费模型显式确认」段的「确认时机」从「每次触发都弹窗确认」改为「每天首次触发弹窗确认，
+      同日后续触发跳过（每日闸）」；relay_instruction.md §0「确认免费模型」从「每次触发都做」改为「每天首次触发做，
+      同日后续跳过」。明确：allowlist 内容本身持久化不变，仅 re-prompt 节奏变化。
+    type: modified
+  - id: C3
+    description: >
+      新增测试：TC-DFC-001 free confirm-status 在 confirmed_at=今天 → due=false；TC-DFC-002 confirmed_at=昨天 →
+      due=true；TC-DFC-003 next/inventory 输出含 free_confirm_due 且与 confirm-status 一致；TC-DFC-004 跨会话
+      （state 持久化）后同一自然日内仍 due=false；TC-DFC-005 文档改写后，SKILL.md「免费模型显式确认」段的确认时机
+      改为「每天首次触发」并含「自然日」表述、且该段不再要求「每次触发」（时段确认 ① 段维持每触发，不计入）。
+    type: new
+
+capabilities:
+  new:
+    - name: "free confirm-status（每日闸判定）"
+      description: "基于 free_allowlist.confirmed_at 的本地自然日，返回当前是否仍需确认免费模型（due）；next/inventory 同步输出 free_confirm_due，使「每天一次确认」跨会话可靠生效，不依赖 AI 记忆。"
+  modified:
+    - name: "免费模型显式确认 工作流"
+      description: "Step 0 ② 从「每次触发都弹窗确认」改为「每天首次触发确认、同日后续跳过」，由 confirm-status 驱动；allowlist 持久化口径不变。"
+
+constraints:
+  - "仅放宽 re-prompt 节奏，不改 allowlist 语义：免费模型白名单仍由用户显式 free set 决定并持久化；每日闸只控制「是否弹窗」，不自动勾选/改动白名单。"
+  - "自然日定义：以本机本地时区的日历日（YYYY-MM-DD）为准；跨自然日 00:00 视为到期，重新确认。"
+  - "零阻断：confirm-status 与 next 的 free_confirm_due 仅读取 state，不联网、不写文件、不影响既有 next 选择逻辑。"
+  - "与时段确认（Step 0 ① 时段滚轮）解耦：本 change 只动 ② 免费模型确认；① 时段确认维持原「每次触发」节奏（除非用户后续纳入）。"
+  - "双根一致：state 在 ~/.workbuddy 与 ~/.workbuddy-ai 各自独立（沿用既有双根纪律）；每日闸判定基于各自 state 的 confirmed_at，无需跨根同步。"
+  - "向后兼容：旧 state 无 free_allowlist.confirmed_at（或 allowlist 未确认）→ confirm-status 视 due=true（等同现状每触发确认），不破坏既有行为。"
+
+stakeholders:
+  - "relay 用户：免费模型确认从每触发一次降为每天一次，降低 friction；白名单仍由自己掌握。"
+  - "子代理接棒流程（relay_instruction.md）：Step 0 ② 的触发频率变化。"
+  - "本机双根环境：state 各自的自由确认日期独立计算。"
+
+risk_areas:
+  - capability: "free confirm-status（每日闸判定）"
+    risk: "时区/日历日计算错误（如用 UTC 而非本地日、跨午夜边界）导致该确认时未确认或反之。"
+    mitigation: "明确用本地日历日（datetime.now().astimezone().date() 或等价）；TC-DFC-001/002 用注入的「今天/昨天」断言边界；TC-DFC-004 验证跨会话。"
+  - capability: "免费模型显式确认 工作流"
+    risk: "文档改写后 AI 误读为「永不确认」，导致白名单 drift 或完全跳过确认；或仍每触发确认（改写不生效）。"
+    mitigation: "TC-DFC-005 静态断言 SKILL.md/relay_instruction.md 含「每天/每日」+自然日表述且不再要求「每次触发」；同时保留 Step 0 ② 的存在性。"
+  - capability: "free confirm-status（每日闸判定）"
+    risk: "next/inventory 新增 free_confirm_due 字段被下游（子代理 prompt / 其它脚本）误消费为选择信号。"
+    mitigation: "字段为只读提示，不改变 next 选择结果；与既有 allowlist:「unset」/「applied」 字段并列，属增量只读字段。"
+
+non_goals:
+  - "不改动 ① 时段滚轮确认（Step 0 第 ① 步）的确认节奏（维持每触发），除非用户后续明确要求。"
+  - "不自动勾选/修改免费模型白名单；每日闸只控制「是否弹窗」，确认动作仍由用户完成。"
+  - "不引入「一次性开关」或全局关闭确认的配置；每日闸已满足诉求且保留安全边界。"
+  - "不改变 free set / free clear / free show 的既有增删查语义（仅新增 confirm-status 与 next/inventory 的 due 提示）。"
+  - "不在本 change 动 Qoder-free 自动发现逻辑（前序 relay-v560-qoder-free-source 负责）。"
+
+critical:
+  is_critical: false
+  risk_assessment:
+    safety_critical: false
+    financial: false
+    cross_system: false
+
+anchoring:
+  level: L2
+  reference_changes:
+    - "relay-v560-qoder-free-source"
+    - "2026-10-08-free-model-confirm"
+  anchor_implementations:
+    - "免费模型白名单持久化：free set 写 free_allowlist.ids + confirmed_at（pick_model.py ~L2100-2162）"
+    - "load_free_allowlist / save_state 的 state 读写（pick_model.py ~L1724-1819）"
+    - "next / inventory 输出结构（pick_model.py cmd_next / cmd_inventory 的 JSON 字段）"
+    - "Step 0 ② 文档约定：SKILL.md「免费模型显式确认」L224-274、relay_instruction.md §0 L23-45"
+
+success_criteria:
+  - "SC1：free confirm-status 在 free_allowlist.confirmed_at 为今天（本地自然日）时返回 due=false；为昨天时返回 due=true。"
+  - "SC2：next / inventory 输出含 free_confirm_due 字段，且值与 free confirm-status 一致（TC-DFC-003）。"
+  - "SC3：跨会话（state 持久化）后，同一本地自然日内 free_confirm_due 仍为 false（TC-DFC-004）。"
+  - "SC4：旧 state 无 confirmed_at 或 allowlist 未确认时，confirm-status 与 next 均视 due=true（向后兼容，等同现状）。"
+  - "SC5：SKILL.md「免费模型显式确认」段的确认时机改写为「每天首次触发」并含「自然日」表述、且该段不再要求「每次触发」；relay_instruction.md §0 同理（TC-DFC-005）。时段确认 ① 段维持每触发、不计入。"
+  - "SC6：TC-DFC-001~005 全绿；确认节奏由每触发降为每天一次，白名单语义与 next 选择结果不变。"

@@ -1,0 +1,58 @@
+active_phase: build
+active_slice: 0
+baseline:
+  at: '2026-10-11T06:46:49+00:00'
+  base_git_sha: unversioned
+  clock_source: system
+  established_by: gate1
+  node_id: DESKTOP-1MEQDMR
+change_id: relay-v550-program-cache-scanner
+change_name: relay-v550-program-cache-scanner
+complexity_score: 7
+status: archived
+gate1:
+  confirmed_at: '2026-10-11T14:50:00+08:00'
+  confirmed_by: dialog
+  evidence: 用户指示：直接收尾（放弃追收125.3审计结论）+ 请继续 + 确认；Gate 1 框已展示，用户明确确认。
+  status: confirmed
+gate3:
+  status: confirmed
+last_action: Phase 3 BUILD 完成（9 切片全实现 + 17 新 TC + 73 既有回归全绿 + 双根+install.sh 载荷同步）；待
+  Gate 3 确认后进入 DELIVER
+last_modified: '2026-10-11T16:53:00+08:00'
+long_range:
+  enabled: true
+  mode: full_auto
+  pre_auth_completed: true
+  pre_auth_scope:
+    gate3: mandatory
+    network_scope: loopback_only
+    product_code_mutation_authorized: true
+    product_code_outside_workspace:
+    - ~/.workbuddy/skills/free-model-relay/scripts/pick_model.py
+    - ~/.workbuddy-ai/skills/free-model-relay/scripts/pick_model.py
+  pre_auth_timestamp: '2026-10-11T15:25:00+08:00'
+mode: standard
+phase_context_file: ''
+phases:
+  build:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-11T10:18:20+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 用户 Please continue 明确授权进入 Phase 4 DELIVER
+    status: completed
+  spec:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-11T07:23:34+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 确认通过 Gate 2
+    status: completed
+  understand:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-11T06:46:49+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 用户指示：直接收尾（放弃追收125.3审计结论）+ 请继续 + 确认；Gate 1 框已展示，用户明确确认。
+    status: completed
+resume_context: ''
+score_confidence: preliminary
+task_type: code

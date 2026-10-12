@@ -1,0 +1,10 @@
+# Python 字节码
+__pycache__/
+*.py[cod]
+
+# pick_model.py 写 models.json 前的自动备份（*.bak-<ts>）
+*.bak-*
+
+# 本机专属设置（含绝对路径，不入库）
+.claude/settings.local.json
+.codebuddy/settings.local.json

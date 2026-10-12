@@ -1,0 +1,117 @@
+# proposal.yaml — Canonical 格式
+# Change: relay-v550-program-cache-scanner
+# 状态：draft（待 Gate 1 确认）
+
+meta:
+  change_id: "relay-v550-program-cache-scanner"
+  title: "free-model-relay v5.5.0：启动扫描程序侧账号-产品配置缓存，替代硬编码免费窗口"
+  created: "2026-10-11T14:45:00+08:00"
+  status: draft
+
+why:
+  problem: >
+    SKILL.md 硬编码了 `FREE_WINDOW_DEFAULT.until="2026-10-10"` 与统一 23:00–08:00 免费窗口，
+    带来三重错误：(1) 错误排除本应免费的 hy3 系——实测 hy3/hy3-b/hy3-c 是全天免费（base credits x0.00，无时段限制）；
+    (2) 误判"平台活动已结束"——实测活动实际至 2026-11-01；(3) 任何平台活动变化都需人工改 skill 才能跟随，且容易静默出错。
+  motivation: >
+    2026-10-11 实测解剖 `~/.workbuddy/cache/acc-product-config-v3.json` 发现：程序启动时已缓存完整的账号-产品配置，
+    内含 `models[].credits`（x0.00 = 免费）与 `modelPromotions[]`（完整免费/折扣活动清单，含模型、时段、validUntil）。
+    这是权威、零 API key 的数据源。改用"启动扫描程序缓存"可让免费/折扣清单自动跟随平台活动，彻底消除人工维护与静默排除错误。
+  evidence:
+    observed_at: "2026-10-11T14:20:00+08:00"
+    observed_base_git_sha: "829fc03 (user-reported v5.4 HEAD；本环境非沙箱 git 解析为 home repo branch main 无提交，待交付阶段复验)"
+    details: >
+      双根缓存解析实测（Python 直读 JSON）：
+      - hy3 / hy3-b / hy3-c：base credits x0.00，全天免费，validUntil 2026-11-01
+      - hy4-preview / hy4-preview-dev：base credits x0.29 + promo 0x，仅夜间 23:00–08:00 免费，validUntil 2026-11-01
+      - glm-5.2：夜间 0.50x；deepseek-v4 系：非高峰 0.50x
+      - WorkBuddy AI 根（~/.workbuddy-ai/cache/acc-product-config-v3.json）额外标记 deepseek-v4.1-flash 为 base x0.00 免费
+      全部 7 条 modelPromotions，validUntil 均为 2026-11-01（非 skill 写的 2026-10-10）。
+      该发现同时关闭一处旧待查项：hy4-preview 05:31 调用落在夜间免费窗且活动至 11-01，确为免费调用而非计费。
+
+what_changes:
+  - id: C1
+    description: >
+      新增启动扫描器 scan_program_config()：读取双根 acc-product-config-v3.json，解析 models[].credits 与
+      modelPromotions[] 的 schedule（时段）+ validUntil（有效期）+ discountedCredits（折扣后倍率），
+      按"当前时刻是否在活动时段内且未过期"计算 effective = base_credits × active_promo_factor，
+      输出"当前免费/折扣模型清单（含时段/有效期/倍率）"。
+    type: new
+  - id: C2
+    description: >
+      重写候选池构建逻辑 build_candidate_pool()：默认只用程序侧免费/折扣模型（裸 id：hy3 / hy4-preview / glm-5.2 / deepseek-v4 系），
+      BYOK custom-local:* 退出默认路径，仅作兜底路线。
+    type: modified
+  - id: C3
+    description: >
+      移除 SKILL.md 中硬编码的 FREE_WINDOW_DEFAULT.until="2026-10-10" 与统一 23:00–08:00 窗口判断，
+      改为消费扫描器输出（free_now = scanner.effective == 0 且当前在窗口内）。
+    type: removed
+  - id: C4
+    description: >
+      重写 relay next 输出：程序模型用裸 id（hy3 等），不再强制 custom-local: 前缀；
+      该前缀仅保留给 BYOK 兜底路线（应对同名劫持 + 429 限流两个坑只对 BYOK 路线存在）。
+    type: modified
+  - id: C5
+    description: >
+      缓存降级处理：缓存文件未生成 / 路径变更 / 字段缺失 / 已过期时，回退到 models.json 或显式报错，不静默返回空清单导致误判为"无免费"。
+    type: new
+
+capabilities:
+  new:
+    - name: "scan_program_config"
+      description: "从程序侧账号-产品配置缓存动态生成当前免费/折扣模型清单（含时段、有效期、倍率），零 API key、零硬编码。"
+  modified:
+    - name: "build_candidate_pool"
+      description: "候选池默认只用程序侧免费/折扣模型裸 id；BYOK custom-local:* 仅作兜底。"
+    - name: "resolve_free_window / next"
+      description: "免费窗口判定与 next 输出改为消费扫描器结果，不再依赖 skill 硬编码日期与时段。"
+
+constraints:
+  - "零 API key：扫描只读本地缓存文件，绝不调用接口或携带密钥。"
+  - "双根适配：必须扫描 ~/.workbuddy 与 ~/.workbuddy-ai 两根缓存并合并（它们是独立程序、目录不同、字段可能不一致）。"
+  - "字段解耦：缓存字段名（credits / discountedCredits / validUntil / schedule）须与程序版本解耦；程序升级改名时必须能降级而非崩溃。"
+  - "延续指令1：分发物（install.sh / SKILL.md）不内置任何模型条目与 API Key，模型由启动扫描自行发现。"
+  - "不引入新的静默失败：任何降级路径必须显式告警（日志/非零退出），不得吞错。"
+
+stakeholders:
+  - "relay 用户：免费模型调度是否准确、是否误触收费。"
+  - "平台侧：活动配置（只读消费方）。"
+  - "本机多根环境：WorkBuddy 根与 WorkBuddy AI 根并行。"
+
+risk_areas:
+  - capability: "scan_program_config"
+    risk: "缓存未生成 / 路径变更 / 字段改名（程序升级）导致解析失败或读到空清单，反而把免费模型误判为收费。"
+    mitigation: "C5 降级：缓存缺失/字段异常时回退 models.json 或显式报错；validUntil 过期视为无活动；解析异常不静默。"
+  - capability: "build_candidate_pool"
+    risk: "程序模型裸 id 与 BYOK custom-local:* 同名混淆，重蹈 10-11 同名劫持覆辙。"
+    mitigation: "路线分离——程序模型走裸 id、BYOK 仅兜底；扫描器只产出程序侧清单，BYOK 由 scan/models add 独立处理。"
+  - capability: "resolve_free_window / next"
+    risk: "时段计算（23:00–08:00 跨午夜、validUntil 边界）出错，导致夜间窗误判。"
+    mitigation: "单元测试覆盖跨午夜时段与有效期边界；扫描器输出带显式窗口区间供测试断言。"
+
+non_goals:
+  - "不实现 BYOK 模型自动发现（仍由 scan / models add 处理）。"
+  - "不修改平台侧配置（仅只读消费缓存）。"
+  - "不做跨账号聚合或远程同步。"
+  - "不在此次 change 混入 OW Bridge 借鉴项（所有权标记 / 工具调用探测 / 多根适配已在 MEMORY 单列，留待后续 change）。"
+
+critical:
+  is_critical: false
+  risk_assessment:
+    safety_critical: false
+    financial: false
+    cross_system: false
+
+anchoring:
+  level: L2
+  reference_changes: []
+  anchor_implementations: []
+
+success_criteria:
+  - "SC1：扫描器能从双根缓存读取并输出当前免费模型清单，且 hy3 标记为全天免费（base credits x0.00、无时段限制）、hy4-preview 标记为夜间免费（23:00–08:00）、validUntil=2026-11-01。"
+  - "SC2：当 acc-product-config-v3.json 缺失或字段异常时，扫描器回退到 models.json 或显式报错（非零退出），不静默返回空清单导致误判为'无免费'。"
+  - "SC3：候选池默认只含程序侧免费/折扣模型裸 id；relay next 输出不含 custom-local: 前缀（除非走 BYOK 兜底路线）。"
+  - "SC4：SKILL.md 中 FREE_WINDOW_DEFAULT.until=\"2026-10-10\" 与统一 23:00–08:00 判断被移除，且 fstdd validate 能确认无残留硬编码日期/时段常量。"
+  - "SC5：在 2026-10-11 实测活动窗口内，扫描器输出的免费清单与程序缓存逐项一致（hy3 全天免费、hy4 夜间免费、glm-5.2 夜间5折、deepseek-v4 非高峰5折）。"
+  - "SC6：双根（WorkBuddy + WorkBuddy AI）缓存均被扫描并合并，AI 根额外标记 deepseek-v4.1-flash base 0x 免费也被纳入候选池。"

@@ -1,0 +1,59 @@
+# spec.yaml — resolve_free_window / next（Coding 行为规格）
+meta:
+  capability: "resolve_free_window_next"
+  change_id: "relay-v550-program-cache-scanner"
+  created: "2026-10-11T15:30:00+08:00"
+  confidence: medium
+
+requirements:
+  - id: REQ-001
+    description: "免费窗口判定改为消费扫描器结果，移除对硬编码日期/时段的依赖。"
+    scenarios:
+      - id: SC-001
+        confidence: high
+        evidence: "what_changes C3：'移除 FREE_WINDOW_DEFAULT.until 与统一 23:00-08:00 判断，改为消费扫描器输出'；FREE_WINDOW_DEFAULT 在 pick_model.py L109 硬编码 until=2026-10-10"
+        given: "扫描器存在当前免费模型；FREE_WINDOW_DEFAULT 常量仍含 until='2026-10-10'"
+        when: "resolve_source('auto') 决策 all/custom"
+        then: "SHALL 基于扫描器 free_now 结果决定（有免费→'all'），而非基于 FREE_WINDOW_DEFAULT 的硬编码 until"
+        and:
+          - "resolve_source 返回值 SHALL 附带 scanner_reason 说明判定来源"
+      - id: SC-002
+        confidence: high
+        evidence: "what_changes C3：free_now = scanner.effective == 0 且当前在窗口内"
+        given: "某程序模型 id 经扫描器判定 free_now=True"
+        when: "is_free_window(model_id, now) 被调用"
+        then: "SHALL 优先返回扫描器判定 (True, '<scanner reason>')"
+        and:
+          - "扫描器整体不可用时，SHALL 回落既有 models.json freeWindow 链（C5 回退），不报错中断"
+
+  - id: REQ-002
+    description: "relay next 输出程序模型裸 id，custom-local: 前缀仅保留给 BYOK 兜底路线。"
+    scenarios:
+      - id: SC-003
+        confidence: high
+        evidence: "what_changes C4：'程序模型用裸 id，不再强制 custom-local: 前缀；该前缀仅保留给 BYOK 兜底路线'；MEMORY：custom-local: 前缀只为应对同名劫持+429，两坑仅 BYOK 路线存在"
+        given: "cmd_next 选中程序侧模型 'hy3'"
+        when: "cmd_next 输出 selected"
+        then: "SHALL 输出裸 id 'hy3'（不含 'custom-local:' 前缀）"
+        and:
+          - "输出 JSON SHALL 含 recommended_prefix=''（程序项）"
+      - id: SC-004
+        confidence: high
+        evidence: "what_changes C4：前缀仅保留给 BYOK 兜底路线"
+        given: "cmd_next 选中 BYOK 兜底路线模型（source='byok_fallback'）"
+        when: "cmd_next 输出 selected"
+        then: "SHALL 在 recommended_prefix 字段给出 'custom-local:'，调用方据此加前缀"
+        and:
+          - "裸 id 本身 SHALL 不含前缀（前缀由调用方按 recommended_prefix 拼接）"
+
+  - id: REQ-003
+    description: "SKILL.md 硬编码 FREE_WINDOW_DEFAULT.until 与统一窗口判断被移除，且无残留常量。"
+    scenarios:
+      - id: SC-005
+        confidence: high
+        evidence: "SC4：'SKILL.md 中 FREE_WINDOW_DEFAULT.until=2026-10-10 与统一 23:00-08:00 判断被移除，且 fstdd validate 能确认无残留硬编码日期/时段常量'；MEMORY：SKILL.md L366 含 'until':'2026-10-10'"
+        given: "v5.5.0 变更已落地"
+        when: "检查 SKILL.md 与 pick_model.py 源码"
+        then: "SHALL 不含 FREE_WINDOW_DEFAULT.until='2026-10-10' 与统一 '23:00-08:00' 硬编码窗口常量"
+        and:
+          - "fstdd validate SHALL 能确认无残留硬编码日期/时段常量（SC4 可验证）"

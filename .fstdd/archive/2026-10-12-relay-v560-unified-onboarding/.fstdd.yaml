@@ -1,0 +1,48 @@
+baseline:
+  at: '2026-10-12T12:37:37+00:00'
+  base_git_sha: unversioned
+  clock_source: system
+  established_by: gate1
+  node_id: DESKTOP-1MEQDMR
+change_id: 2026-10-12-relay-v560-unified-onboarding
+complexity_score: 16
+current_phase: build
+design_adjustments:
+  count: 4
+long_range:
+  enabled: true
+  mode: full_auto
+  pre_auth_completed: true
+  pre_auth_timestamp: '2026-10-12T20:45:11+08:00'
+mode: thorough
+phases:
+  build:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-12T13:17:01+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 用户批准 Gate 3（回 Please continue.）；18/18 新用例 + 全量回归 25/25 通过；同意进入
+      Phase 4 DELIVER
+    status: completed
+  deliver:
+    status: pending
+  spec:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-12T12:42:46+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 用户批准 Gate 2（回 Please continue.）
+    status: completed
+  understand:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-12T12:37:37+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 用户批准 Gate 1（回 Please continue.）；3 拍板结论取推荐：撤回 daily-free-confirm
+      / 保留旧 wheel 作 fallback / 保留 window+free 命令标 deprecated
+    status: completed
+score_confidence: high
+status: archived
+task_type: code
+traceability:
+  spec_scenarios: 11
+  tc_cases: 13
+  test_functions: 18
+version: '3.0'

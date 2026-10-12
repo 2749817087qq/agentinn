@@ -1,0 +1,64 @@
+# spec.yaml — scan_program_config（Coding 行为规格）
+meta:
+  capability: "scan_program_config"
+  change_id: "relay-v550-program-cache-scanner"
+  created: "2026-10-11T15:30:00+08:00"
+  confidence: high
+
+requirements:
+  - id: REQ-001
+    description: "扫描双根程序缓存，按 active promotion 计算 effective credits，输出当前免费/折扣模型清单（含时段、有效期、倍率）。"
+    scenarios:
+      - id: SC-001
+        confidence: high
+        evidence: "observed_at=2026-10-11T14:20:00+08:00 source=双根 acc-product-config-v3.json 直读实测：hy3 base x0.00 全天免费 / hy4-preview base x0.29+promo 0x 夜间免费 / validUntil=2026-11-01"
+        given: "双根缓存均存在且字段完整；now 落在 hy3 全天免费窗内、hy4-preview 夜间窗内"
+        when: "调用 scan_program_config(now=now)"
+        then: "SHALL 返回含 hy3(free_now=True, window=null, valid_until=2026-11-01) 与 hy4-preview(free_now=True, window={start:23,end:8}, valid_until=2026-11-01) 的条目"
+        and:
+          - "每条目 SHALL 含 base_credits / effective_credits / free_now / source_root"
+          - "effective_credits SHALL = base × active_promo_factor"
+      - id: SC-002
+        confidence: high
+        evidence: "observed_at=2026-10-11T14:20:00+08:00 实测：AI 根 deepseek-v4.1-flash base x0.00 免费"
+        given: "双根缓存均存在；某模型 id 在两根都存在但 effective 不同（如 AI 根 base x0.00 vs 另一根 base x0.29）"
+        when: "scan_program_config 合并双根同 id 模型"
+        then: "SHALL 取更低 effective 作为合并结果（保守，避免把收费当免费）"
+        and:
+          - "合并后 source_root SHALL 标记来源，便于追溯"
+      - id: SC-003
+        confidence: medium
+        evidence: "observed_at=2026-10-11T14:20:00+08:00 实测：glm-5.2 夜间 0.50x / deepseek-v4 非高峰 0.50x 属折扣非免费"
+        given: "now 落在 glm-5.2 夜间折扣窗（effective = base × 0.5 ≠ 0）"
+        when: "scan_program_config 处理折扣模型"
+        then: "该模型 free_now SHALL = False（effective != 0 即非免费），但 SHALL 出现在折扣清单（effective_credits 反映 0.5x）"
+        and:
+          - "free_now 严格判定 SHALL 为 effective_credits == 0"
+
+  - id: REQ-002
+    description: "缓存缺失/字段异常时降级，不静默返回空清单导致误判为'无免费'。"
+    scenarios:
+      - id: SC-004
+        confidence: high
+        evidence: "约束：'不引入新的静默失败：任何降级路径必须显式告警'；C5 风险缓解：缓存缺失/字段异常时回退或显式报错"
+        given: "仅一根缓存缺失、另一根正常"
+        when: "scan_program_config 逐根读取"
+        then: "SHALL 跳过缺失根并记 warning，继续用正常根产出结果（非空）"
+        and:
+          - "结果 SHALL 携带 warnings[] 标记被跳过根"
+      - id: SC-005
+        confidence: high
+        evidence: "风险_areas.scan_program_config：缓存未生成/路径变更/字段改名导致解析失败；C5 缓解：双根都失败回退 models.json 或显式报错"
+        given: "双根均缺失或双根字段完全无法解析（扫描器整体不可用）"
+        when: "scan_program_config 判定整体不可用"
+        then: "SHALL 显式告警并回退到既有 models.json freeWindow 链（不静默空清单）"
+        and:
+          - "若回退链本身也失败（如 models.json 缺失），SHALL 以非零退出码报错"
+      - id: SC-006
+        confidence: medium
+        evidence: "约束：'字段解耦：缓存字段名须与程序版本解耦；程序升级改名时必须能降级而非崩溃'"
+        given: "某根缓存存在但 models[] 中单条模型缺 credits 字段"
+        when: "scan_program_config 解析该模型"
+        then: "SHALL 将该模型标记 degraded 并跳过，不中断整次扫描"
+        and:
+          - "degraded 列表 SHALL 包含在返回结果中供上层告警"

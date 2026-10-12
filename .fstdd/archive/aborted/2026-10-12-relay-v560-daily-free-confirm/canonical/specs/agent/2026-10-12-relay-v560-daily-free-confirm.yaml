@@ -1,0 +1,97 @@
+# agent_spec.yaml — Agent 验证规格（Canonical YAML）
+# Change: relay-v560-daily-free-confirm
+# coding 任务：与 spec.yaml 配合，CP 检查点对应 spec Scenario，assertions 对应 THEN
+# 另含 C2 文档改写（SKILL.md / relay_instruction.md 工作流文案）的验证点
+
+meta:
+  task_id: "verify-relay-v560-daily-free-confirm"
+  change_id: "2026-10-12-relay-v560-daily-free-confirm"
+  task_type: code
+  system: "free-model-relay pick_model.py（~/.workbuddy-ai 开发副本，同步至 ~/.workbuddy 权威副本）；被测 = _free_confirm_status / cmd_free(confirm-status) / cmd_next / cmd_inventory / free set / free clear；文档 = SKILL.md §免费模型显式确认、relay_instruction.md §0 确认免费模型"
+  preconditions:
+    - "测试以 importlib 加载被测 pick_model.py；HOME 指向临时目录隔离，不触碰真实 models.json / state"
+    - "日期断言一律通过 monkeypatch now_utc 或 helper 入参 now= 注入，不依赖真实墙上时钟"
+    - "被测脚本输出仅 ASCII（与 run-all.py text=True 解码链路兼容）"
+
+steps:
+  - id: "CP-1"
+    description: "SC-001 未确认 → confirm-status due=true（只读、不改 state）"
+    action: "临时 HOME 写干净 state（无 free_allowlist）；执行 free confirm-status"
+    assertions:
+      - type: stdout_json_field
+        field: "due"
+        expected: true
+      - type: stdout_json_field
+        field: "confirmed_at"
+        expected: null
+      - type: stdout_json_field
+        field: "state"
+        expected: "unset"
+  - id: "CP-2"
+    description: "SC-002 已确认且为今天 → confirm-status due=false"
+    action: "临时 HOME state 写 free_allowlist={ids:[x],confirmed_at:<今天本地 ISO>}；monkeypatch now_utc 为今天；执行 free confirm-status"
+    assertions:
+      - type: stdout_json_field
+        field: "due"
+        expected: false
+      - type: stdout_json_field
+        field: "confirmed_date"
+        expected_not: null
+  - id: "CP-3"
+    description: "SC-003 已确认但跨天（昨天）→ confirm-status due=true"
+    action: "临时 HOME state 写 free_allowlist={ids:[x],confirmed_at:<昨天本地 ISO>}；monkeypatch now_utc 为今天；执行 free confirm-status"
+    assertions:
+      - type: stdout_json_field
+        field: "due"
+        expected: true
+  - id: "CP-4"
+    description: "SC-004 脏 confirmed_at → due=true 且原值保留回显"
+    action: "临时 HOME state 写 free_allowlist={ids:[x],confirmed_at:not-a-date}；执行 free confirm-status"
+    assertions:
+      - type: stdout_json_field
+        field: "due"
+        expected: true
+      - type: stdout_json_field
+        field: "confirmed_at"
+        expected: "not-a-date"
+  - id: "CP-5"
+    description: "SC-005/SC-006 next 与 inventory 透传 free_confirm_due"
+    action: "未确认态执行 inventory 与 next；已确认今天态（monkeypatch now_utc）再执行 inventory 与 next"
+    assertions:
+      - type: stdout_json_field
+        field: "free_confirm_due"
+        expected: true
+      - type: stdout_json_field
+        field: "free_confirm_due"
+        expected: false
+  - id: "CP-6"
+    description: "SC-007 free set 重置当日已确认（set 后 confirm-status due=false）"
+    action: "临时 HOME 干净 state；执行 free set --ids <valid-id>（monkeypatch now_utc 为今天）；紧接 free confirm-status"
+    assertions:
+      - type: stdout_json_field
+        field: "due"
+        expected: false
+  - id: "CP-7"
+    description: "SC-008 free clear 使次日重新到期（clear 后 confirm-status due=true）"
+    action: "临时 HOME state 写已确认今天；执行 free clear；紧接 free confirm-status"
+    assertions:
+      - type: stdout_json_field
+        field: "due"
+        expected: true
+      - type: stdout_json_field
+        field: "state"
+        expected: "unset"
+  - id: "CP-8"
+    description: "C2 文档改写：SKILL.md / relay_instruction.md 文案由「每次触发」改为「每天首次触发 + free_confirm_due」"
+    action: "grep SKILL.md / relay_instruction.md 确认含「每天首次触发」「free_confirm_due」且不含旧文案「每次触发都弹窗确认」「每次触发都做」"
+    assertions:
+      - type: file_contains
+        expected: "每天首次触发"
+      - type: file_not_contains
+        expected: "每次触发都弹窗确认"
+  - id: "CP-9"
+    description: "C2 测试维护：test-free-model-confirm.py 静态断言同步为「每天首次触发」/「free_confirm_due」"
+    action: "运行回归 tests/test-free-model-confirm.py 确认不再因旧文案「每次触发」而红"
+    assertions:
+      - type: exit_code
+        expected: 0

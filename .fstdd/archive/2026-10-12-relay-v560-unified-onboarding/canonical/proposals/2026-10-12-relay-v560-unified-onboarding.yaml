@@ -1,0 +1,152 @@
+# 2026-10-12-relay-v560-unified-onboarding.yaml — Canonical Proposal (YAML-first, V2.9)
+# AI 起草、AI 修改、AI 消费。Human View 由 `stdd canon generate` 生成。
+
+meta:
+  change_id: "2026-10-12-relay-v560-unified-onboarding"
+  title: "Relay Step 0 重设计：统一启用向导（始终免费 / 平台时段 / 自定义渠道 + AgentHub 双层）"
+  created: "2026-10-12T20:29:00+08:00"
+  status: draft
+  version: "3.0"
+
+why:
+  problem: |
+    当前 relay Step 0 拆成两块独立渲染：① 时段滚轮（SKILL.md `relay-window-wheel`）+ ② 模型白名单勾选（`free set` / `inventory`），割裂且 UI 拥挤。v5.5.0 扫描器修复后存在 3 类模型分层（始终免费 x0.00 / 平台时段免费 / 自定义 BYOK 额度制），旧 Step 0 无法体现；且**免费时段是逐模型（per-model）属性**（hy3 全天免费 / glm-5.2 夜间免费 / hy4-preview 仅 23:00-8:00），旧全局单滚轮无法表达。daily-free-confirm change 已到 Gate 2 想把「每次确认」降为「每日一次」，但作为单点改造治标不治本；用户已明确要求把时间 + 模型 + 渠道 + 截至时间 + AgentHub 决策合成一个统一控件，新对话自动弹出。AgentHub（MULTIhub 协作中枢）当前无任何 onboarding 入口，与 relay 流程脱节。
+  evidence:
+    observed_at: "2026-10-12T20:29:00+08:00"
+    observed_base_git_sha: "wb-root pre-change (placeholder, fill at Gate 1)"
+    details: |
+      1) 截图 2026-10-12T20:14 旧 `relay-window-wheel` 渲染：滚轮 76x108 露 3 数字，时段显示「23 - 8」无 :00，控件挤左半，提示裸文本。
+      2) v5.5.0 扫描器实测 2026-10-12T20:20：parse unit 11/11 PASS；scanner by_id=42 free_ids=['hy3']（base=0.0 free_now=True window=None）；hy3/hy3-b/hy3-c 为 x0.00 credits 全时免费（validUntil 2026-11-01）；glm-5.2/deepseek-v4-flash/kimi-k2.6 为平台时段模型；Qoder-free 为第三方 BYOK 额度制。
+      3) 残留显示 bug：`window.per_model` 仍把 hy3 标「受时段约束」（不影响实际判定，待上游修）。
+      4) 用户设计决策 2026-10-12T20:25（三选一确认）：归属=免费渠道（系统=平台免费时段 / 自定义=BYOK）；hy3 独立「始终免费」分组；AgentHub 双层（偏好 + 立即开通按钮）。
+      5) v2 原型 deliverables/free-model-relay/relay-unified-onboarding-prototype-v2.html 已落地三组分渠道 + 时段约束 + AgentHub 双层。
+      6) daily-free-confirm change（2026-10-12-relay-v560-daily-free-confirm）Phase 2 spec 写完在 Gate 2 待批，需被本 change 吸收 / 取代。
+
+what_changes:
+  - description: |
+      C1（UI）：SKILL.md 替换 `relay-window-wheel:start` 至 `relay-window-wheel:end` 块为新的 `relay-onboarding-wizard:start` 至 `:end` 块；4 段结构：① 始终免费组（hy3/hy3-b/hy3-c，系统模型，时段=宿主程序规范·只读展示）② 平台时段组（GLM/DeepSeek/Kimi，系统模型，渠道可切，时段=宿主程序规范·只读展示，不提供编辑）③ 自定义渠道组（**BYOK + 桥接**：Qoder-free / OpenCode(OW Bridge, 标记 buddyBridgeOwner) / external 等，源分类复用 `origins` 命令；**每个模型单独选时段**：免费时段 / 全天 + 起止小时滚轮，可展开；**桥接模型也尝试扫描其免费时段并预填**，用户可调）④ AgentHub 双层（偏好 toggle + 立即开通按钮）。**分工原则**：系统模型的时段**直接采用宿主程序规范**（不用选 / 不可改，只展示），**只有自定义模型需要逐个选时间段**。同步 relay_instruction.md「Step 0」章节文案。旧 `relay-window-wheel` 块保留 1 个 release 作为 fallback。
+  - description: |
+      C2（后端）：pick_model.py 新增 `onboard` 子命令（一次性落盘 `state.relay_onboard`：`{confirmed_at, groups, periods, agenthub_pref}`，groups 分 always_free / platform_sys / platform_cust / custom 四类，**periods 为逐模型 `{<id>:{all_day, start_hour, end_hour}}`**）；新增 `onboard-status` 子命令返回 `{due, confirmed_at, last_config_hash, today, drift_detected}`（due=未确认 或 本地自然日 != 今天 或 数据漂移）；`next` / `inventory` 输出增 `onboard_due` 布尔；`window` / `free set` / `free clear` 维持旧行为但标 deprecated。
+  - description: |
+      C3（agent / 触发）：relay_instruction.md + SKILL.md 新增「Step 0 触发规则」：agent 在新对话冷启动时调用 `onboard-status`；若 due 则渲染统一向导并把 `[relay-onboard]` 前缀回传闭环；非 due 则跳过沿用上次配置。AgentHub 立即开通按钮调 multihub-node-onboarding skill（已有，不重写内部流程）。
+
+capabilities:
+  new:
+    - name: "Relay 启用向导（统一 Step 0）"
+      description: |
+        单次渲染 4 段控件（新对话自动弹），覆盖 v5.5.0 三类模型分层 + **逐模型免费时段** + AgentHub 双层决策。`onboard` 子命令一次性落盘，`onboard-status` 返回 due 判定与数据漂移检测。吸收 daily-free-confirm 的「每日一次」意图，按「自然日 + 数据漂移」双因子判定 due。
+    - name: "AgentHub 启用入口"
+      description: |
+        统一向导内嵌 AgentHub 双层（偏好 toggle + 立即开通按钮调 multihub-node-onboarding），把 AgentHub onboarding 与 relay 流程缝合。偏好与开通完成态分开存储。
+  modified:
+    - name: "免费时段确认 + 免费模型白名单"
+      description: |
+        合并为统一向导的 ④ 时段约束段（仅平台组系统通道生效）；`window` / `free set` / `free clear` 命令维持以保证向后兼容与回归套件稳定（标注 deprecated，建议迁移至 `onboard`）。
+    - name: "Step 0 触发规则"
+      description: |
+        从「每次触发弹窗」改为「新对话冷启动 + due 判定」：due=true 才弹统一向导；非 due 静默沿用。完全吸收 2026-10-12-relay-v560-daily-free-confirm 的行为意图。
+
+constraints:
+  - id: "C-BC-1"
+    description: "现有 `window` / `free` / `inventory` / `next` / `scan` 等 CLI 子命令签名与输出 schema 不破坏（仅增字段，不删 / 改既有字段）。"
+  - id: "C-WIN-1"
+    description: "时段分工：**系统模型**的免费时段**直接采用宿主程序规范**（扫描器结果，只读展示，向导不提供编辑入口）；**自定义模型**的时段由用户**逐个选择**（免费时段 / 全天 + 起止小时滚轮），沿用 `window` 命令既有 `{default, models:{<id>:{start_hour,end_hour}}}` 逐模型覆写结构落盘，不得退化为全局单窗口。"
+  - id: "C-SCAN-1"
+    description: "数据源顺序：**先扫描宿主程序**（两根各自 `cache/acc-product-config-v3.json`，字段 `models[].credits` / `modelPromotions[]`）→ 系统模型**自带时间段**（hy3/hy3-b/hy3-c x0.00 全天免费；hy4-preview/-dev 仅夜间 23:00-8:00；glm-5.2 夜间 0.50x；deepseek-v4 非高峰 0.50x）→ 向导**只读展示**系统模型的宿主时段；**桥接模型（Qoder-free / OpenCode 等）同样尝试扫描其免费时段**（不假设无宿主规范），扫到则预填、用户可调；纯 BYOK 自定义模型无扫描源，由用户逐个选。扫描器保持只读，向导不回写宿主 cache。"
+  - id: "C-ISO-1"
+    description: "新增 state 键 `relay_onboard` 经 `normalize_state` / `save_state` 保留未知键语义（TC-MAINT-004/005 已守），不污染既有 state。"
+  - id: "C-TIME-1"
+    description: "所有日期访问经 `now_utc()` 单一时间源（守 TC-TEST-003「全仓 datetime.now 只许 1 次」）。"
+  - id: "C-MIG-1"
+    description: "对存量用户做一次性 state 迁移：读 `free_allowlist`（v5.1+）+ `window_config`（v5.2+）→ 派生 `relay_onboard.groups` 与 `period`，迁移后旧键保留只读以保回归。"
+  - id: "C-AGHUB-1"
+    description: "AgentHub 立即开通按钮只调 multihub-node-onboarding skill（不内嵌 8210 面板交互，AI 不可代跑），由用户在本机面板完成设备授权。"
+  - id: "C-RUNALL-1"
+    description: "新测试断言仅 ASCII（run-all.py text=True 无 encoding），子进程中文需 utf-8 显式解码（EXP-2026-0006）。"
+
+stakeholders:
+  - role: "primary"
+    name: "用户"
+    interest: "Step 0 一次性确认（新对话自动弹，统一看清三组渠道），不再每次触发被打断；AgentHub 启用有显式入口。"
+  - role: "agent"
+    name: "AI agent（WorkBuddy AI / 子代理）"
+    interest: "统一 due 判定 + `[relay-onboard]` 前缀回传闭环，减少交互回合；onboard 命令一次落盘不需多次 free set / clear。"
+  - role: "scanner"
+    name: "v5.5.0 扫描器"
+    interest: "保持只读，groups 分类消费其 default_free / free_now / window 字段，不反向写入。"
+  - role: "test-suite"
+    name: "tests/run-all.py 回归套件"
+    interest: "现有 test-free-model-confirm / test-relay-qoder-free-source 等套件保持绿；旧 wheel 相关静态断言（SKILL.md 含「每次触发」）随 C1 文案改写而失效，需同步更新为「按 due 判定」语义。"
+
+risk_areas:
+  - id: "R-UI"
+    description: "新向导 5 段交互复杂度高，agent 渲染失败 / 脚本未执行会回到旧 wheel 路径作为 fallback。"
+    severity: "medium"
+    mitigation: |
+      保留旧 `relay-window-wheel` 块直到 v2 上线验证完成（双轨过渡 1 个 release）；提供 `onboard-status` 的 due=true 路径优先级，渲染失败回退到旧 wheel 并打印 stderr warning。
+  - id: "R-MIG"
+    description: "存量用户的 state 从 free_allowlist / window_config 迁移到 relay_onboard 时，可能因历史脏数据（confirmed_at 缺失 / 非字符串 / ids 包含非 Custom vendor）造成迁移后 groups 残缺。"
+    severity: "medium"
+    mitigation: |
+      迁移函数 `migrate_to_relay_onboard(state)` 防御性归一化：缺失 / 脏字段降级为 `groups={}` 空但不报错；agent 收到 due=true 提示用户重新确认；不写盘除非 onboard 命令显式落盘。
+  - id: "R-AGHUB"
+    description: "AgentHub 立即开通按钮跨 skill 调用 multihub-node-onboarding，依赖 panel 交互（用户本机），AI 端不可代跑；若用户长时间不响应，偏好 toggle 已存但开通未完成，造成状态不一致。"
+    severity: "low"
+    mitigation: |
+      偏好与开通完成态分开：agenthub_pref 存 toggle；agenthub_onboarded 单独字段由 multihub-node-onboarding 写入；向导底部文案明示「偏好已存，开通需本机面板」。
+  - id: "R-DEP"
+    description: "window / free set / clear 标 deprecated 后，回归套件 test-free-model-confirm.py 仍大量断言「每次触发」旧文案，造成假红。"
+    severity: "low"
+    mitigation: |
+      Phase 3 必须同步更新该测试的静态文案断言为「按 due 判定」+「统一向导」；列 TC-UOB-008 显式覆盖。
+  - id: "R-V55"
+    description: "v5.5.0 `window.per_model` 显示 bug 仍未修（hy3 被标「受时段约束」），新向导 ① 始终免费组的标注依赖 v5.5 扫描器返回的 `free_now=True window=None`，与显示层脱节但不影响向导判定。"
+    severity: "low"
+    mitigation: |
+      向导以扫描器判定为准（不读 window.per_model），标注「v5.5 扫描器: x0.00 credits · validUntil 2026-11-01」；待上游修显示 bug 后自动对齐。
+
+non_goals:
+  - "不改 v5.5.0 扫描器核心逻辑（_parse_credits / by_id 解析）"
+  - "不改 multihub-node-onboarding skill 内部流程"
+  - "不重做 install.sh 嵌入载荷格式（仅同步 SKILL.md / pick_model.py 增量）"
+  - "不引入新依赖（保持纯标准库 Python）"
+  - "不实现 client 端轮询 / 长连接（[relay-onboard] 回传走 WorkBuddy 原生 sendPrompt）"
+
+critical:
+  blockers: []
+  questions:
+    - "是否把 2026-10-12-relay-v560-daily-free-confirm（Gate 2）整体撤回 / 归档？推荐：是，本 change 取代其 Step 0 行为。"
+    - "是否保留旧 `relay-window-wheel` 块作为 fallback？推荐：是，1 个 release 双轨过渡。"
+    - "是否把 `window` / `free set` / `free clear` 命令直接删除？推荐：否，保留并标 deprecated，回归套件 + 外部脚本兼容。"
+  external:
+    - "依赖 multihub-node-onboarding skill（已存在）"
+
+anchoring:
+  L1_components:
+    - "free-model-relay/SKILL.md (relay-window-wheel block, L88-174)"
+    - "free-model-relay/scripts/pick_model.py (now_utc L148, _effective_free_window L458, _window_mode L481, _per_model_window_view L507, is_free_window L559, scanner L675, cmd_inventory L1932, FREE_ALLOWLIST_KEY L1790, cmd_free L2094, cmd_next L2176, cmd_window_set L4073, cmd_window L4136)"
+    - "free-model-relay/scripts/pick_model.py origins 命令（源分类 relay / ow-bridge / qoder-free / external，供 ③ 自定义渠道组枚举桥接源）"
+  L2_changes:
+    - "2026-10-08-free-model-confirm（被吸收 / 归档）"
+    - "2026-10-12-relay-v560-qoder-free-source（Gate 3 待批，本 change 不阻塞其 Phase 4 交付）"
+    - "2026-10-12-relay-v560-daily-free-confirm（Gate 2 撤回 / 归档）"
+  L3_external:
+    - "multihub-node-onboarding skill (C:\\Users\\Administrator\\.workbuddy-ai\\skills\\multihub-node-onboarding\\SKILL.md)"
+  L4_constraints:
+    - "v5.5.0 program-side free models (hy3/hy3-b/hy3-c x0.00 validUntil 2026-11-01)"
+    - "v5.5.0 扫描器 by_id=42 free_ids=['hy3']"
+    - "window.per_model 显示 bug 未修（hy3 受时段约束误标）"
+
+success_criteria:
+  - id: "SC-1"
+    description: "统一向导在临时 HOME 下渲染出 4 段结构（始终免费 / 平台时段 / 自定义渠道 / AgentHub），模型按 v5.5.0 三类正确分组（hy3 进 ①，GLM/DeepSeek/Kimi 进 ②，Qoder-free 进 ③）；② 组每个模型行可展开出该模型自己的免费时段（免费时段 / 全天 + 起止小时）。"
+  - id: "SC-2"
+    description: "onboard 子命令一次落盘 state.relay_onboard={confirmed_at, groups, periods(逐模型 {<id>:{all_day,start_hour,end_hour}}), agenthub_pref}；onboard-status 返回 {due, confirmed_at, last_config_hash, today, drift_detected}，未确认 / 跨天 / 数据漂移任一触发 due=true。"
+  - id: "SC-3"
+    description: "新对话冷启动：agent 调 onboard-status，若 due=true 渲染统一向导并把 [relay-onboard] 前缀回传；非 due 静默沿用不弹窗。"
+  - id: "SC-4"
+    description: "AgentHub 双层：偏好 toggle 存 state.relay_onboard.agenthub_pref；立即开通按钮调 multihub-node-onboarding skill（mock 测试验证调用契约，不实跑面板）。"
+  - id: "SC-5"
+    description: "存量 state 迁移：test 验证 free_allowlist + window_config 存在时，migrate_to_relay_onboard 派生正确 groups/period，迁移后旧键保留只读。"
+  - id: "SC-6"
+    description: "TC-UOB-001~013 全绿；test-free-model-confirm.py 旧 wheel 静态断言同步更新为「统一向导 / 按 due 判定」后通过；全量回归（tests/run-all.py）除已知 pre-existing 环境问题外全绿。"

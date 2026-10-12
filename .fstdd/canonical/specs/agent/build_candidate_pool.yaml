@@ -1,0 +1,30 @@
+# agent_spec.yaml — build_candidate_pool（Agent 验证规格）
+meta:
+  task_id: "verify-build-candidate-pool"
+  change_id: "relay-v550-program-cache-scanner"
+  task_type: code
+  system: "free-model-relay pick_model.py — 候选池构建"
+  preconditions:
+    - "扫描器可注入结果（monkeypatch scan_program_config 返回可控清单）"
+
+steps:
+  - id: CP-1
+    description: "默认候选集为程序侧裸 id，无 custom-local 前缀（SC1/SC2）"
+    action: "build_free_candidate_pool(now) 扫描器返回 [hy3, hy4-preview]"
+    assertions:
+      - type: stdout_contains
+        expected: "hy3"
+      - type: stdout_contains
+        expected: "recommended_prefix"
+  - id: CP-2
+    description: "BYOK 仅兜底（SC3/SC4）"
+    action: "扫描器返回空列表，断言回退 load_declared_models 且 source=byok_fallback"
+    assertions:
+      - type: stdout_contains
+        expected: "byok_fallback"
+  - id: CP-3
+    description: "默认路线零 BYOK（同名不混淆）"
+    action: "扫描器返回含 hy3 且 models.json 也声明 hy3，断言候选集仅程序侧 hy3"
+    assertions:
+      - type: stdout_contains
+        expected: "hy3"
