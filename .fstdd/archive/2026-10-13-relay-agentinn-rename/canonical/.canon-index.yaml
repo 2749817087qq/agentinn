@@ -1,0 +1,11 @@
+designs: {}
+proposals:
+  2026-10-13-relay-agentinn-rename: proposals/2026-10-13-relay-agentinn-rename.yaml
+specs:
+  agent:
+    agentinn-rename: specs/agent/agentinn-rename.yaml
+    data-file-migration: specs/agent/data-file-migration.yaml
+  code:
+    agentinn-rename: specs/code/agentinn-rename.yaml
+    data-file-migration: specs/code/data-file-migration.yaml
+version: '2.9'

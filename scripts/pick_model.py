@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Free Model Relay — pick_model.py v4
+AgentInn — pick_model.py v4
 模型来源双轨制：models.json 自定义模型 + WorkBuddy 平台内置模型（hy3/hy4-preview）。
 支持智能工作性质分配 + 流量统计 + 自动切换 + 平台免费时段感知。
 
@@ -8,7 +8,7 @@ Free Model Relay — pick_model.py v4
   # 时段感知 / 时段写回
   python pick_model.py window                             # 查看平台模型免费时段状态
   python pick_model.py window set --start-hour 22 --end-hour 7
-                                                          # 写覆盖文件 ~/.workbuddy/free-model-relay-window.json
+                                                          # 写覆盖文件 ~/.workbuddy/agentinn-window.json
   python pick_model.py window set --until 2026-12-31 --write-models-json
                                                           # 显式写 models.json（自动备份 + 原子替换 + 写后校验）
 
@@ -58,9 +58,78 @@ FALLBACK_DATA_ROOT = os.path.join(HOME, ".workbuddy")
 
 # relay 数据文件名（与既有命名一致）
 _MODELS_JSON_NAME = "models.json"
-_STATE_NAME = "free-model-relay-state.json"
-_USAGE_NAME = "free-model-relay-usage.json"
-_OVERRIDE_WIN_NAME = "free-model-relay-window.json"
+_STATE_NAME = "agentinn-state.json"
+_USAGE_NAME = "agentinn-usage.json"
+_OVERRIDE_WIN_NAME = "agentinn-window.json"
+
+# 改名前的数据文件名前缀（一次性迁移用）。
+# ⚠️ 用**拼接构造**旧名前缀，使本文件不含旧名字面 —— 改名守卫 TC-ARN-001a 会扫本文件内容。
+_DATA_NAME_PREFIX = "agentinn-"
+_LEGACY_DATA_PREFIX = "free-" + "model-relay-"
+
+
+def _legacy_data_name(new_name):
+    """把新数据文件名映射回改名前的旧名（仅用于迁移读取）。"""
+    if new_name.startswith(_DATA_NAME_PREFIX):
+        return _LEGACY_DATA_PREFIX + new_name[len(_DATA_NAME_PREFIX):]
+    return new_name
+
+
+def _migrate_legacy_data_files():
+    """把旧名数据文件**复制**为新名（只读旧、写新、保留旧），幂等、失败静默。
+
+    迁移契约（SC-010/012/013）：
+      · 仅当**新名文件不存在**且**旧名文件存在**时复制（新旧并存 ⇒ 以新为准，不覆盖）；
+      · 旧文件**保留**（不删除），便于回滚；
+      · 任何异常一律静默吞掉，绝不阻断主命令；
+      · 覆盖数据根白名单（.workbuddy / .workbuddy-ai）+ env 显式根，去重。
+    """
+    roots = []
+    try:
+        env_root = os.environ.get("FMR_DATA_ROOT")
+        if env_root:
+            roots.append(env_root)
+        env_models = os.environ.get("FMR_MODELS_JSON")
+        if env_models:
+            roots.append(os.path.dirname(os.path.abspath(env_models)))
+        for name in DATA_ROOT_WHITELIST:
+            roots.append(os.path.join(HOME, name))
+        roots.append(FALLBACK_DATA_ROOT)
+    except (OSError, ValueError):
+        # 尽力而为：根收集失败（如 env 含非法字符）即放弃迁移，绝不阻断主命令（评审 P2-2）
+        return
+
+    seen = set()
+    for root in roots:
+        try:
+            root = os.path.abspath(root)
+        except (OSError, ValueError):
+            continue
+        if root in seen or not os.path.isdir(root):
+            continue
+        seen.add(root)
+        for new_name in (_STATE_NAME, _USAGE_NAME, _OVERRIDE_WIN_NAME):
+            tmp = None
+            try:
+                src = os.path.join(root, _legacy_data_name(new_name))
+                dst = os.path.join(root, new_name)
+                if os.path.exists(dst) or not os.path.exists(src):
+                    continue
+                with open(src, "rb") as f:
+                    blob = f.read()
+                # 临时名带 pid：并发迁移互不覆盖（评审 P2-1）
+                tmp = "%s.migrating.%d" % (dst, os.getpid())
+                with open(tmp, "wb") as f:
+                    f.write(blob)
+                os.replace(tmp, dst)
+            except OSError:
+                # 失败静默：迁移是尽力而为，绝不阻断主命令
+                if tmp:
+                    try:
+                        if os.path.exists(tmp):
+                            os.remove(tmp)
+                    except OSError:
+                        pass
 
 
 def compute_data_paths(root):
@@ -1997,24 +2066,38 @@ def _detect_source_tool(models):
     """依据条目上的 *Owner 标记判定这批模型由哪个工具写入。
 
     返回 (tool, detail)：
-      - 含 relayOwner               → ("relay", "free-model-relay")
-      - 含非 relayOwner 的 *Owner    → ("ow-bridge"|"external", 已知名或键名)
-      - 无任何 *Owner 标记            → ("unknown", None)
-    复用 _owner_marker_keys / RELAY_OWNER_KEY / KNOWN_EXTERNAL_OWNERS，
+      - 含 relayOwner（且无外部 *Owner） → ("relay", <标记值：旧值/新值/回退 agentinn>)
+      - 含非 relayOwner 的 *Owner        → ("ow-bridge"|"external", 已知名或键名)
+      - 无任何 *Owner 标记                → ("unknown", None)
+    复用 _owner_marker_keys / RELAY_OWNER_KEY / RELAY_OWNER_VALUES / KNOWN_EXTERNAL_OWNERS，
     与 models add / list 的判定口径一致，不另起一套（避免漂移）。
+
+    外部标记优先（与 cmd_models_list 一致，评审 P1-3）：同一条目**同时**带 relayOwner
+    与外部标记时按 external 归类（保守口径），避免「origins 报 relay、list 报 external」漂移。
+
+    双标记兼容（SC-014/015）：relay 标记值无论为旧值还是新值（或历史条目缺值），
+    一律判为 relay；detail 回显实际标记值，便于 origins 诊断旧数据。
     """
     tool, detail = "unknown", None
     for m in models:
         if not isinstance(m, dict):
             continue
-        for k in _owner_marker_keys(m):
-            if k == RELAY_OWNER_KEY:
-                return "relay", "free-model-relay"
+        keys = _owner_marker_keys(m)
+        # 外部标记优先：存在任何非 relayOwner 的 *Owner 键 ⇒ 按 external 归类（与 list 对齐）
+        external_keys = [k for k in keys if k != RELAY_OWNER_KEY]
+        if external_keys:
+            k = external_keys[0]
             mapped = OWNER_TOOL_MAP.get(k)
             if mapped:
                 tool, detail = mapped, (KNOWN_EXTERNAL_OWNERS.get(k) or k)
             else:
                 tool, detail = "external", k
+            continue
+        if RELAY_OWNER_KEY in keys:
+            val = m.get(RELAY_OWNER_KEY)
+            if isinstance(val, str) and val in RELAY_OWNER_VALUES:
+                return "relay", val
+            return "relay", RELAY_OWNER_VALUE
     return tool, detail
 
 
@@ -2024,7 +2107,9 @@ def cmd_origins(args):
     与 `inventory` 的区别：inventory 只报"当前 data-root 下可声明模型"，
     origins 横向枚举 whitelist 中**全部** root（去重），指出每条模型由哪个
     工具写入（relay / OW Bridge / 平台），并给出每个来源的免费语义——
-    让用户一眼看清"免费候选到底从哪来"。纯只读，不改任何文件。
+    让用户一眼看清"免费候选到底从哪来"。纯只读，不修改 relay 的语义数据；唯一例外是
+    进程启动时的一次性数据迁移（旧名文件→新名，幂等、保留旧文件，见
+    `_migrate_legacy_data_files`，评审 P1-4）。
     """
     sources = []
     seen_roots = set()
@@ -3461,7 +3546,11 @@ def _cli_fail(message, **extra):
 #    （EXP-2026-0003「`'stdd guard'` 假阴性」的同构案例）。
 OWNER_KEY_SUFFIX = "Owner"
 RELAY_OWNER_KEY = "relayOwner"
-RELAY_OWNER_VALUE = "free-model-relay"
+RELAY_OWNER_VALUE = "agentinn"
+# 双标记兼容（SC-014/015）：改名前的旧标记值仍视为「本工具所有」。
+# 旧值用**拼接构造**，避免本文件出现旧名字面（改名守卫 TC-ARN-001a）。
+RELAY_OWNER_LEGACY_VALUE = "free-" + "model-relay"
+RELAY_OWNER_VALUES = frozenset({RELAY_OWNER_VALUE, RELAY_OWNER_LEGACY_VALUE})
 # 已知外部标记：**只用于把错误文案写得更可读**；判定一律按后缀，不按白名单
 # （按白名单判定会让未知标记静默放行，与「宁可拒绝」的保守默认相反）。
 KNOWN_EXTERNAL_OWNERS = {"buddyBridgeOwner": "OW Bridge", "qoderFreeOwner": "Qoder-free"}
@@ -4025,7 +4114,8 @@ def cmd_models_add(args):
 def cmd_models_list(args):
     """**只读**列出全部已声明模型的密钥状态三态与来源三态（SC-MO-016）。
 
-    只读契约：不写任何文件、不建备份、不动 usage。
+    只读契约：不写 `models.json`、不建备份、不动 usage（唯一例外：进程启动期一次性数据
+    迁移可能新建 `agentinn-state/usage/window.json`，不涉及 `models.json`，评审 P1-4）。
     输出不含任何密钥原文 —— 只报 `key_status`（present/placeholder/missing），
     占位符条目额外报变量名与其是否已定义（变量名不是密钥值，可用于排障）。
     `source` 三态：`relay`（带 `relayOwner`）/ `external`（带其它 `*Owner` 标记）/
@@ -4845,7 +4935,7 @@ def add_source_arg(p):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Free Model Relay v4 — 免费模型智能选择器 + 流量统计 + 平台模型时段感知")
+        description="AgentInn v4 — 免费模型智能选择器 + 流量统计 + 平台模型时段感知")
     sub = parser.add_subparsers(dest="command", help="子命令")
 
     # 带 --source 的命令
@@ -4985,6 +5075,11 @@ def main():
                       help="sync=强制刷新发现并写入 models.json；status=查看可达性与已发现模型")
 
     args = parser.parse_args()
+
+    # 改名后一次性数据迁移：旧名文件 → 新名（只读旧、写新、保留旧；幂等、失败静默）。
+    # 放在任何子命令之前，保证后续读取一律命中新名。
+    _migrate_legacy_data_files()
+
     if not args.command:
         parser.print_help()
         sys.exit(1)

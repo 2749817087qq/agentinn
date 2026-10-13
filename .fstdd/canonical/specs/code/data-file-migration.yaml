@@ -1,0 +1,81 @@
+# spec.yaml — 行为规格（Canonical YAML）
+# Change: relay-agentinn-rename
+# Capability（新）: data-file-migration
+# 配套 proposal: canonical/proposals/2026-10-13-relay-agentinn-rename.yaml
+
+meta:
+  capability: "data-file-migration"
+  change_id: "2026-10-13-relay-agentinn-rename"
+  created: "2026-10-13T08:05:00+08:00"
+  confidence: high
+
+requirements:
+  - id: "REQ-DFM-001"
+    description: "数据文件名常量改为新名：新装环境生成 agentinn-*.json（不再生成旧名文件）"
+    scenarios:
+      - id: "SC-009"
+        confidence: high
+        evidence: "proposal C4；pick_model.py L61-63 三个文件名常量。"
+        given: "空数据根（无任何 state/usage/window 文件）"
+        when: "执行任一写 state 的子命令（如 `free set --ids a`）"
+        then: "SHALL 生成 `agentinn-state.json`（及按需 `agentinn-usage.json` / `agentinn-window.json`）"
+        and:
+          - "SHALL NOT 生成 `free-model-relay-*.json`"
+
+  - id: "REQ-DFM-002"
+    description: "自动迁移：只读旧、写新、不删旧；幂等"
+    scenarios:
+      - id: "SC-010"
+        confidence: high
+        evidence: "proposal C4；用户选择「自动迁移 + 双标记兼容」。"
+        given: "数据根仅有旧文件 `free-model-relay-state.json`（含已知内容），无新文件"
+        when: "执行任一读取 state 的子命令（如 `status`）"
+        then: "SHALL 生成 `agentinn-state.json`，其内容 SHALL 与旧文件等价"
+        and:
+          - "旧文件 `free-model-relay-state.json` SHALL 仍存在（只读保留，可回滚）"
+      - id: "SC-011"
+        confidence: high
+        evidence: "proposal C4（旧缺失→新建）。"
+        given: "数据根无旧文件也无新文件"
+        when: "执行 `status`"
+        then: "SHALL 正常返回（不因缺文件报错），退出码 SHALL 为 0"
+      - id: "SC-012"
+        confidence: high
+        evidence: "proposal C4（并存→以新为准）；防止用旧内容覆盖新状态。"
+        given: "数据根同时存在旧文件与新文件（新文件含不同于旧的内容）"
+        when: "执行 `status` 并读回新文件"
+        then: "新文件内容 SHALL 保持不变（SHALL NOT 被旧文件覆盖）"
+      - id: "SC-013"
+        confidence: high
+        evidence: "rename-refactor 第 2 步（幂等）。"
+        given: "已完成一次迁移（新文件已生成）"
+        when: "再次执行同一命令"
+        then: "新文件内容 SHALL 不变，且 SHALL NOT 产生额外副本"
+
+  - id: "REQ-DFM-003"
+    description: "所有权标记双值兼容：旧值与新值均识别为 relay 所有"
+    scenarios:
+      - id: "SC-014"
+        confidence: high
+        evidence: "proposal C5；EXP-2026-0002 同构（老条目不得失主）。"
+        given: "models.json 某条目带 `relayOwner: \"free-model-relay\"`（旧值）"
+        when: "执行 `models add`（或所有权判定路径）"
+        then: "该条目 SHALL 被识别为 relay 所有（source == \"relay\"）"
+        and:
+          - "SHALL NOT 被判为 external 而拒绝/跳过"
+      - id: "SC-015"
+        confidence: high
+        evidence: "proposal C5（新值）。"
+        given: "models.json 某条目带 `relayOwner: \"agentinn\"`（新值）"
+        when: "执行所有权判定路径"
+        then: "该条目 SHALL 被识别为 relay 所有"
+        and:
+          - "新写入的标记值 SHALL 为 `agentinn`"
+      - id: "SC-016"
+        confidence: high
+        evidence: "既有契约：`_owner_marker_keys` 用 endswith(\"Owner\") 精确判定，防子串误判。"
+        given: "models.json 某条目带 `qoderFreeOwner` / `buddyBridgeOwner`（其它 owner）"
+        when: "执行所有权判定路径"
+        then: "该条目 SHALL 被识别为 external（非 relay）"
+        and:
+          - "SHALL NOT 因双值兼容而把其它 owner 误判为 relay"

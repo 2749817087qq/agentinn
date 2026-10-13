@@ -13,7 +13,7 @@ paths:
   templates_dir: .fstdd/templates
 project:
   language: python
-  name: stdd
+  name: agentinn
   python_version: '3.10'
-  source_dir: app
+  source_dir: .
 stdd_version: 3.0.5

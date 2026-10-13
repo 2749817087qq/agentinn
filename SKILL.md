@@ -1,6 +1,6 @@
 ---
-name: free-model-relay
-summary: "免费模型子代理接棒器 — 显式确认免费模型 + 自动检测新模型 + 按工作性质智能分配"
+name: agentinn
+summary: "AgentInn 多模型接棒器 — 显式确认免费模型 + 自动检测新模型 + 按工作性质智能分配"
 description: |
   读取 ~/.workbuddy/models.json 中的自定义免费模型，在 FSTDD 四阶段流程的子代理委派点
   用这些模型启动 Agent，实现"每个会话通过子代理接棒使用免费 AI"的目标。
@@ -27,13 +27,13 @@ description: |
           流量统计、模型配额、自动切换、免费量到了、hy3、hy4、平台模型、免费时段、
           确认免费模型、免费模型白名单、额度用完、额度告警、
           时段滚轮、免费时段确认、改免费时段、window set、relay-window
-version: "5.6.1"
+version: "5.7.0"
 author: agent_created
 license: unknown
 
 ---
 
-# Free Model Relay v4 — 免费模型子代理接棒器
+# AgentInn v4 — AgentInn 多模型接棒器
 
 ## 核心理念
 
@@ -45,7 +45,7 @@ WorkBuddy 的 Agent 工具 `model` 参数接受模型 ID。`models.json` 中的�
 
 **v5.1 新增**：免费模型**显式确认**（`inventory` 枚举全部可声明模型 → 弹窗勾选 → `free set` 存白名单，relay 只从白名单内挑）、额度耗尽**弹窗告警**（`record`/`next` 输出 `quota_alerts`）。见下文「免费模型显式确认」。
 
-**v5.2 新增**：Step 0 的**时段滚轮确认窗口**（内联 HTML 滚轮：展示当前时段 / 免费判定 / 倒计时，并可改起止小时）、`window set` 写回命令（默认写 relay 侧**覆盖文件** `~/.workbuddy/free-model-relay-window.json`，只有 `--write-models-json` 才动含 API Key 的 `models.json`）、免费时段**三级配置**（覆盖文件 > `models.json` 的 `freeWindow` > 源码默认，逐字段生效）。
+**v5.2 新增**：Step 0 的**时段滚轮确认窗口**（内联 HTML 滚轮：展示当前时段 / 免费判定 / 倒计时，并可改起止小时）、`window set` 写回命令（默认写 relay 侧**覆盖文件** `~/.workbuddy/agentinn-window.json`，只有 `--write-models-json` 才动含 API Key 的 `models.json`）、免费时段**三级配置**（覆盖文件 > `models.json` 的 `freeWindow` > 源码默认，逐字段生效）。
 
 **v5.3 新增**：
 - **密钥录入 `models add` / `models list`** —— 不再需要手改 `models.json`。支持交互式 `getpass`、非交互 `--from-env <VAR>`（落盘 `${VAR}` 字面量，读时才展开）与 `--stdin`；写盘走「备份 → 原子替换 → 写后重读比对」，任何输出通道都不回显密钥原文。见下文「密钥录入」。
@@ -71,11 +71,11 @@ v5.6.0 合并为**单次**向导（4 段）：**时段 / 模型 / 归属 / 免�
 
 ```bash
 # ① 判是否到期（未确认 / 跨自然日 / 数据漂移）
-$PY $SCRIPT onboard-status   # → {due, confirmed_at, last_config_hash, current_config_hash, today, agenthub}
+agentinn onboard-status   # → {due, confirmed_at, last_config_hash, current_config_hash, today, agenthub}
 # ② due=true 才渲染向导；先取预填数据
-$PY $SCRIPT onboard          # → {system_models[], custom_models[], agenthub, scanner_available}
+agentinn onboard          # → {system_models[], custom_models[], agenthub, scanner_available}
 # ③ 用户调整 + 确认后落盘
-$PY $SCRIPT onboard set --json '{"groups":{...},"custom_periods":{...},"agenthub_pref":false}'
+agentinn onboard set --json '{"groups":{...},"custom_periods":{...},"agenthub_pref":false}'
 ```
 
 - **`due: false`**（当天已确认且配置未漂移）⇒ **不渲染向导**，直接继续。
@@ -212,7 +212,7 @@ $PY $SCRIPT onboard set --json '{"groups":{...},"custom_periods":{...},"agenthub
 
 1. `agenthub.action == "prompt_enable"` 且 `agenthub.prompted_on != 今天` ⇒ **发起** AgentHub 开通流程
    （调 `multihub-node-onboarding` skill，本机面板交互授权）。
-2. 发起后**立即**执行 `pick_model.py onboard agenthub-ack` 记录当日 —— 防打扰，**每自然日一次**。
+2. 发起后**立即**执行 `agentinn onboard agenthub-ack` 记录当日 —— 防打扰，**每自然日一次**。
 3. `agenthub.onboarded == true` 或 `agenthub.prompted_on == 今天` ⇒ **跳过**，不再发起/提示。
 
 ### 降级规则
@@ -233,7 +233,7 @@ $PY $SCRIPT onboard set --json '{"groups":{...},"custom_periods":{...},"agenthub
 ### 数据来源
 
 ```bash
-$PY $SCRIPT window
+agentinn window
 ```
 
 输出 JSON 含 `in_free_window` / `window_config` / `config_source` / `expired` / `warning` /
@@ -408,7 +408,7 @@ $PY $SCRIPT window
 
 ```bash
 # ② 枚举全部可声明模型（含非 Custom vendor 条目 + 平台内置）
-$PY $SCRIPT inventory
+agentinn inventory
 ```
 
 输出 `models[]`，每项含 `id` / `name` / `vendor` / `declared_in`（`models.json` / `platform`）/
@@ -419,12 +419,12 @@ $PY $SCRIPT inventory
 
 ```bash
 # ④ 保存勾选结果（白名单）
-$PY $SCRIPT free set --ids alpha-model,beta-model
-$PY $SCRIPT free show      # 回看当前白名单
-$PY $SCRIPT free clear     # 清空（退回未确认状态）
+agentinn free set --ids alpha-model,beta-model
+agentinn free show      # 回看当前白名单
+agentinn free clear     # 清空（退回未确认状态）
 
 # ⑤ 正常选模型 —— relay 只从白名单内挑
-$PY $SCRIPT next --strategy auto --job code-review
+agentinn next --strategy auto --job code-review
 ```
 
 ### 关键约定
@@ -478,20 +478,20 @@ $PY $SCRIPT next --strategy auto --job code-review
 
 ```bash
 # 交互式录入（密钥不回显）
-$PY $SCRIPT models add --id my-model --url https://api.example.com/v1
+agentinn models add --id my-model --url https://api.example.com/v1
 
 # 非交互：从环境变量引用 —— 磁盘只存 ${VAR} 字面量，读时才展开（密钥不落盘明文）
-MY_KEY=sk-xxxx $PY $SCRIPT models add --id my-model --url https://api.example.com/v1 --from-env MY_KEY
+MY_KEY=sk-xxxx agentinn models add --id my-model --url https://api.example.com/v1 --from-env MY_KEY
 
 # 非交互：从管道读密钥（自动去尾换行）
-echo -n "sk-xxxx" | $PY $SCRIPT models add --id my-model --url https://api.example.com/v1 --stdin
+echo -n "sk-xxxx" | agentinn models add --id my-model --url https://api.example.com/v1 --stdin
 
 # 只读查看：每个条目标注 present / placeholder / missing + 来源三态 source（绝不回显密钥）
-$PY $SCRIPT models list
+agentinn models list
 
 # v5.4：目标条目带第三方所有权标记（如 OW Bridge 的 buddyBridgeOwner）时默认拒绝，
 # --force 是唯一放行口 —— 只解除拒绝，不绕过写入安全协议
-$PY $SCRIPT models add --id bridged-model --url https://api.example.com/v1 --force
+agentinn models add --id bridged-model --url https://api.example.com/v1 --force
 ```
 
 **关键约定**：
@@ -504,7 +504,7 @@ $PY $SCRIPT models add --id bridged-model --url https://api.example.com/v1 --for
 | `${VAR}` 落盘形态 | 磁盘保留字面量，**消费时**才展开；变量未定义则早失败、不落盘 |
 | 安全写协议 | 写前备份 `models.json.bak-<UTC>` → 原子替换 → 写后逐字段重读比对 |
 | 密钥遮蔽 | 所有输出通道（stdout / stderr / 错误 JSON / traceback）均不回显密钥原文 |
-| 所有权标记（v5.4） | relay 写入的条目带 `relayOwner: "free-model-relay"`；目标条目**已有** `relayOwner` 时**保留原值**（不覆盖） |
+| 所有权标记（v5.4） | relay 写入的条目带 `relayOwner: "agentinn"`；目标条目**已有** `relayOwner` 时**保留原值**（不覆盖） |
 | 外部所有权保护（v5.4） | 目标条目带**非 relay 的** `*Owner` 键（键名以 `Owner` 结尾，大小写敏感；已知外部工具：`buddyBridgeOwner` = OW Bridge）⇒ **拒绝写入**：错误 JSON 含 `code="ownership_rejected"` / `owner_keys` / `unknown_marker`，退出码 1，并提示加 `--force` |
 | `--force` 语义（v5.4） | **只解除所有权拒绝**——不绕过写入安全协议、不绕过参数校验；且对外部标记条目**不会**补打 `relayOwner`（把别人的条目登记成自己的属越权） |
 | `models list` 来源三态（v5.4） | 每条带 `source` 字段：`relay`（relay 写入）/ `external`（带外部 `*Owner` 标记，**优先**判定——与 add 侧「外部标记 ⇒ 需 --force」同口径）/ `unowned`（无任何标记） |
@@ -562,10 +562,10 @@ FREE_WINDOW_DEFAULT = {
 
 ```bash
 # 只给 hy4-preview 覆写为 23-7（其余模型仍走 default 的 23-8）
-$PY $SCRIPT window set --model hy4-preview --end-hour 7
+agentinn window set --model hy4-preview --end-hour 7
 
 # 不带 --model ⇒ 写 default 层，且**保持既有文件形态**（旧扁平结构不升级）
-$PY $SCRIPT window set --start-hour 22 --end-hour 7
+agentinn window set --start-hour 22 --end-hour 7
 ```
 
 **文件形态契约（重要）**：`window set` **不带** `--model` 时，若文件还是旧的扁平结构就
@@ -608,7 +608,7 @@ $PY $SCRIPT window set --start-hour 22 --end-hour 7
 | 顶层是对象而非数组 | 整体回退默认值（不崩溃） |
 
 生效来源可通过 `window` 命令的 `config_source` 字段确认（`default` / `models.json` / `override`）。
-`override` = 覆盖文件 `~/.workbuddy/free-model-relay-window.json` 至少一个字段生效（优先级最高）。
+`override` = 覆盖文件 `~/.workbuddy/agentinn-window.json` 至少一个字段生效（优先级最高）。
 **若 `config_source` 是 `models.json`，仍建议核对 `window_config` 的字段值** ——
 只写了一个字段时，其余字段显示的是默认值。
 
@@ -630,7 +630,7 @@ $PY $SCRIPT window set --start-hour 22 --end-hour 7
 **答��"现在能不能干活、为什么不能"—— 先跑这条命令。**
 
 ```bash
-$PY $SCRIPT doctor
+agentinn doctor
 ```
 
 默认**纯只读**，不修改任何文件。输出（**以下为示例，非实时结果**）：
@@ -693,9 +693,9 @@ $PY $SCRIPT doctor
 ### 联网检查档（v5.3 起分档，v5.4 加工具调用档；默认关闭）
 
 ```bash
-$PY $SCRIPT doctor --check-endpoint   # 可达性档：对每个 url 做连通性探测（含超时上限）
-$PY $SCRIPT doctor --check-key        # 有效性档：发一次最小请求校验密钥（蕴含 --check-endpoint）
-$PY $SCRIPT doctor --check-tools      # 工具调用档：发一次最小工具调用请求，验证模型真返回 tool_call（蕴含 --check-key）
+agentinn doctor --check-endpoint   # 可达性档：对每个 url 做连通性探测（含超时上限）
+agentinn doctor --check-key        # 有效性档：发一次最小请求校验密钥（蕴含 --check-endpoint）
+agentinn doctor --check-tools      # 工具调用档：发一次最小工具调用请求，验证模型真返回 tool_call（蕴含 --check-key）
 ```
 
 | 约定 | 说明 |
@@ -711,9 +711,9 @@ $PY $SCRIPT doctor --check-tools      # 工具调用档：发一次最小工具�
 ### 分层修复（三档，费用安全）
 
 ```bash
-$PY $SCRIPT doctor              # 纯只读
-$PY $SCRIPT doctor --fix        # 只清理真孤立条目（安全）
-$PY $SCRIPT doctor --fix-unsafe # ⚠️ 额外清限流 + 重置配额
+agentinn doctor              # 纯只读
+agentinn doctor --fix        # 只清理真孤立条目（安全）
+agentinn doctor --fix-unsafe # ⚠️ 额外清限流 + 重置配额
 ```
 
 | 档位 | 修什么 | 副作用 |
@@ -726,16 +726,16 @@ $PY $SCRIPT doctor --fix-unsafe # ⚠️ 额外清限流 + 重置配额
 > 但它们是用量统计的合法记录 —— `--fix-unsafe` 不会清零、不会删除它们。
 
 **修复前自动备份**：每次修复都会先把 usage.json 复制为
-`free-model-relay-usage.json.bak-<时间戳>`，输出里的 `backup_path` 字段给出路径与回滚命令：
+`agentinn-usage.json.bak-<时间戳>`，输出里的 `backup_path` 字段给出路径与回滚命令：
 
 ```bash
-cp <backup_path> ~/.workbuddy/free-model-relay-usage.json   # 回滚
+cp <backup_path> ~/.workbuddy/agentinn-usage.json   # 回滚
 ```
 
 ### 排查决策树
 
 ```bash
-$PY $SCRIPT doctor
+agentinn doctor
 ```
 
 | doctor 报什么 | 怎么办 |
@@ -750,7 +750,7 @@ $PY $SCRIPT doctor
 ## 时段查询
 
 ```bash
-$PY $SCRIPT window
+agentinn window
 ```
 
 输出字段：
@@ -823,7 +823,7 @@ $PY $SCRIPT window
 | `auto` | **按工作性质智能分配**，同分模型间轮询 | **推荐，FSTDD 默认** |
 
 默认策略：`round-robin`（未传 `--strategy` 时）。**FSTDD 流程务必显式传 `--strategy auto --job <类型>`**，
-状态文件 `~/.workbuddy/free-model-relay-state.json` 记录轮次和已知模型。
+状态文件 `~/.workbuddy/agentinn-state.json` 记录轮次和已知模型。
 
 > `--job` 是 `--strategy auto` 的**必填参数**。缺失时会报错退出（exit 1）并给出
 > `valid_types` 列表与替代方案指引 —— 不会静默降级为某个默认工作类型，
@@ -984,95 +984,94 @@ Agent(subagent_type="general-purpose", model="custom-local:" + model_doc["id"], 
 
 ### 在 FSTDD 会话中使用（推荐 auto 策略）
 
-0. **先确认时段**（每次触发都做）：`$PY $SCRIPT window` → 渲染「时段滚轮确认窗口」组件，
+0. **先确认时段**（每次触发都做）：`agentinn window` → 渲染「时段滚轮确认窗口」组件，
    用户确认或改起止小时（`window set`）。详见上文「时段滚轮确认窗口」
-1. **再确认免费模型**（每次触发都做）：`$PY $SCRIPT inventory` → Agent 层弹窗勾选 →
-   `$PY $SCRIPT free set --ids <勾选的 id>`。详见上文「免费模型显式确认」
-2. **会话开始**：运行 `$PY $SCRIPT scan` 检测是否有新模型加入
-3. **查看画像**：运行 `$PY $SCRIPT profile` 确认每个模型的工作类型
+1. **再确认免费模型**（每次触发都做）：`agentinn inventory` → Agent 层弹窗勾选 →
+   `agentinn free set --ids <勾选的 id>`。详见上文「免费模型显式确认」
+2. **会话开始**：运行 `agentinn scan` 检测是否有新模型加入
+3. **查看画像**：运行 `agentinn profile` 确认每个模型的工作类型
 4. **委派点选模型**：按 job 类型选最优模型
-   - P1 提案审查 → `next --strategy auto --job spec-writing`
-   - P2 经验搜索 → `next --strategy auto --job general`
-   - P3 代码评审 → `next --strategy auto --job code-review`
-   - P3 测试评审 → `next --strategy auto --job test-gen`
-   - P3 文档评审 → `next --strategy auto --job doc-review`
+   - P1 提案审查 → `agentinn next --strategy auto --job spec-writing`
+   - P2 经验搜索 → `agentinn next --strategy auto --job general`
+   - P3 代码评审 → `agentinn next --strategy auto --job code-review`
+   - P3 测试评审 → `agentinn next --strategy auto --job test-gen`
+   - P3 文档评审 → `agentinn next --strategy auto --job doc-review`
 5. **启动子代理**：用选中的模型 ID 作为 Agent 的 `model` 参数
 6. **状态持久化**：轮次状态自动写入 state 文件，跨会话保持
 
 ### 命令速查
 
 ```bash
-# Python 解释器（用 PATH 里的 python3 / python，按本机实际环境二选一）
-PY="python3"        # 若本机是 python 命令，改成 PY="python"
-SCRIPT="$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py"
+# 推荐：agentinn 命令（安装器写入 ~/.workbuddy/bin/agentinn；若不在 PATH，用绝对路径调用）
+# 等价直调（未安装入口时）：PY="python3"; SCRIPT="$HOME/.workbuddy/skills/agentinn/scripts/pick_model.py"; $PY $SCRIPT <cmd>
 
 # 列出所有模型 + 推断工作类型（auto 源按时段切换）
-$PY $SCRIPT list
-$PY $SCRIPT list --source platform    # 只看平台模型
-$PY $SCRIPT list --source custom      # 只看 models.json
+agentinn list
+agentinn list --source platform    # 只看平台模型
+agentinn list --source custom      # 只看 models.json
 
 # 枚举**全部**可声明模型（含非 Custom vendor 条目 + 平台内置），供弹窗勾选
-$PY $SCRIPT inventory
+agentinn inventory
 
 # 免费模型白名单（显式确认哪些模型算免费）
-$PY $SCRIPT free set --ids alpha-model,beta-model
-$PY $SCRIPT free show
-$PY $SCRIPT free clear
+agentinn free set --ids alpha-model,beta-model
+agentinn free show
+agentinn free clear
 
 # 查看平台模型免费时段状态
-$PY $SCRIPT window
+agentinn window
 
 # 按模型覆写免费时段（不带 --model ⇒ 写 default 层且保持文件形态）
-$PY $SCRIPT window set --model hy4-preview --end-hour 7
+agentinn window set --model hy4-preview --end-hour 7
 
 # 录入 / 查看模型密钥（v5.3；密钥不回显）
-$PY $SCRIPT models add --id my-model --url https://api.example.com/v1
-$PY $SCRIPT models list
+agentinn models add --id my-model --url https://api.example.com/v1
+agentinn models list
 
 # 健康检查（默认零网络；联网档需显式开关）
-$PY $SCRIPT doctor
-$PY $SCRIPT doctor --check-endpoint
-$PY $SCRIPT doctor --check-key
+agentinn doctor
+agentinn doctor --check-endpoint
+agentinn doctor --check-key
 
 # 检测新增/移除的模型（新模型自动推断工作类型）
-$PY $SCRIPT scan
+agentinn scan
 
 # 查看每个模型的工作类型画像
-$PY $SCRIPT profile
+agentinn profile
 
 # 流量统计表（请求数/估算token/配额/剩余/状态）
-$PY $SCRIPT usage
+agentinn usage
 
 # 轮询获取下一个模型
-$PY $SCRIPT next
+agentinn next
 
 # 按工作性质智能分配（推荐，自动跳过超限/限流模型）
-$PY $SCRIPT next --strategy auto --job code-review
-$PY $SCRIPT next --strategy auto --job spec-writing
-$PY $SCRIPT next --strategy auto --job test-gen
-$PY $SCRIPT next --strategy auto --job doc-review
-$PY $SCRIPT next --strategy auto --job general
+agentinn next --strategy auto --job code-review
+agentinn next --strategy auto --job spec-writing
+agentinn next --strategy auto --job test-gen
+agentinn next --strategy auto --job doc-review
+agentinn next --strategy auto --job general
 
 # 指定策略
-$PY $SCRIPT next --strategy fallback
-$PY $SCRIPT next --strategy capability-match --needs tool_call reasoning
+agentinn next --strategy fallback
+agentinn next --strategy capability-match --needs tool_call reasoning
 
 # 记录用量（子代理完成后）
-$PY $SCRIPT record --model glm-5.2 --tokens 1500
+agentinn record --model glm-5.2 --tokens 1500
 
 # 设置配额（免费量上限）
-$PY $SCRIPT quota set --model glm-5.2 --max-requests 1000
-$PY $SCRIPT quota show
+agentinn quota set --model glm-5.2 --max-requests 1000
+agentinn quota show
 
 # 限流标记 / 恢复
-$PY $SCRIPT mark-exhausted --model deepseek-v4-flash --minutes 60
-$PY $SCRIPT clear-exhausted --model deepseek-v4-flash
+agentinn mark-exhausted --model deepseek-v4-flash --minutes 60
+agentinn clear-exhausted --model deepseek-v4-flash
 
 # 重置状态（保留用量统计）
-$PY $SCRIPT reset
+agentinn reset
 
 # 查看当前状态
-$PY $SCRIPT status
+agentinn status
 ```
 
 ## 注意事项
@@ -1090,7 +1089,7 @@ $PY $SCRIPT status
 7. **状态文件安全**：state/usage 文件位于 `~/.workbuddy/` 下，不在项目目录中，不会被
    git 跟踪或 FSTDD 流程误删。`reset` 只清 state，用量统计在 usage.json 保留。
 8. **白名单只从 state 读**：`free set` 写的是
-   `~/.workbuddy/free-model-relay-state.json` 的 `free_allowlist` 键（**不新增文件、
+   `~/.workbuddy/agentinn-state.json` 的 `free_allowlist` 键（**不新增文件、
    不写 models.json** —— models.json 只读，里面有明文 API Key）。
 9. **额度告警不是恒报**：只有**白名单内**模型真达上限/被限流时 `quota_alerts` 才非空；
    未达上限时恒为 `[]`。白名单为空时**恒为 `[]`**（没勾选就没有"勾选的模型用完了"）。
@@ -1101,7 +1100,7 @@ $PY $SCRIPT status
 
 ### 数据模型
 
-每个模型的用量记录在 `free-model-relay-usage.json`（顶层有 `models` 包装层）：
+每个模型的用量记录在 `agentinn-usage.json`（顶层有 `models` 包装层）：
 ```
 {
   "models": {
@@ -1116,7 +1115,7 @@ $PY $SCRIPT status
 }
 ```
 
-轮次状态文件 `free-model-relay-state.json` 另外存**用户确认结果**（不新增文件）：
+轮次状态文件 `agentinn-state.json` 另外存**用户确认结果**（不新增文件）：
 
 ```json
 {
@@ -1141,20 +1140,20 @@ $PY $SCRIPT status
 
 ```bash
 # 流量统计表
-$PY $SCRIPT usage
+agentinn usage
 
 # 记录一次用量（子代理完成后调用，tokens 可选）
-$PY $SCRIPT record --model glm-5.2 --tokens 1500
+agentinn record --model glm-5.2 --tokens 1500
 
 # 设置配额（免费量上限）
-$PY $SCRIPT quota set --model glm-5.2 --max-requests 1000 --max-tokens 500000
-$PY $SCRIPT quota show
+agentinn quota set --model glm-5.2 --max-requests 1000 --max-tokens 500000
+agentinn quota show
 
 # 限流时标记（子代理返回 429/quota 错误时调用）
-$PY $SCRIPT mark-exhausted --model deepseek-v4-flash --minutes 60
+agentinn mark-exhausted --model deepseek-v4-flash --minutes 60
 
 # 恢复
-$PY $SCRIPT clear-exhausted --model deepseek-v4-flash
+agentinn clear-exhausted --model deepseek-v4-flash
 ```
 
 ### FSTDD 使用建议
@@ -1170,7 +1169,7 @@ $PY $SCRIPT clear-exhausted --model deepseek-v4-flash
 | 文件 | 路径 |
 |------|------|
 | 模型配置 | `~/.workbuddy/models.json` |
-| 免费时段覆盖文件 | `~/.workbuddy/free-model-relay-window.json` |
-| 轮次状态 | `~/.workbuddy/free-model-relay-state.json` |
-| 用量统计 | `~/.workbuddy/free-model-relay-usage.json` |
-| 选模型脚本 | `~/.workbuddy/skills/free-model-relay/scripts/pick_model.py` |
+| 免费时段覆盖文件 | `~/.workbuddy/agentinn-window.json` |
+| 轮次状态 | `~/.workbuddy/agentinn-state.json` |
+| 用量统计 | `~/.workbuddy/agentinn-usage.json` |
+| 选模型脚本 | `~/.workbuddy/skills/agentinn/scripts/pick_model.py` |

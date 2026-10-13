@@ -1,0 +1,151 @@
+# 2026-10-13-relay-agentinn-rename.yaml — Canonical Proposal (YAML-first, V2.9)
+# AI 起草、AI 修改、AI 消费。Human View 由 `stdd canon generate` 生成。
+# 状态：draft（待 Gate 1 确认）
+
+meta:
+  change_id: "2026-10-13-relay-agentinn-rename"
+  title: "free-model-relay → agentinn：全量改名 + 真实可执行入口 + 数据迁移"
+  created: "2026-10-13T07:45:00+08:00"
+  status: draft
+  version: "3.0"
+
+why:
+  problem: |
+    技能现名 `free-model-relay` 语义过窄且与实际能力不符：它早已不只是「免费模型」，
+    而是「多模型接棒器 / 模型旅店」（自定义免费 + 平台内置 + 桥接源，统一调度、时段感知、策略分配）。
+    同时**没有真实可执行入口** —— 用户/AI 只能写全路径
+    `python ~/.workbuddy/skills/free-model-relay/scripts/pick_model.py <cmd>`，
+    既冗长又绑死目录名，改名成本高、可读性差。
+    用户 2026-10-12 明确要求：改名为 `agentinn`，且**启动命令就是 `agentinn`**。
+  motivation: |
+    改名 + 真入口一次性解决三件事：(1) 名称如实反映能力（模型旅店）；(2) 用户/AI 用
+    `agentinn <cmd>` 即可，不再记路径；(3) 数据文件名与目录名统一到 `agentinn`，消除品牌残留。
+    风险集中在「改完不等于能用」——改名面横跨源码/文档/目录/文件名/安装位置/数据/标记，
+    故本 change 采用「枚举 → 单次扫描替换 → TDD 双向断言 → 分层验证 → 四类评审 → 同步仓库外实体」
+    的严格改名规程（本机 `rename-refactor` skill）。
+  evidence:
+    observed_at: "2026-10-13T07:40:00+08:00"
+    observed_base_git_sha: "23f8b7d（relay v5.6.1 交付提交）"
+    details: |
+      2026-10-13 全库侦察结果：
+      (1) 源码/文档命中：SKILL.md 15 处、relay_instruction.md 10 处、scripts/pick_model.py 7 处
+      （含 _STATE_NAME/_USAGE_NAME/_OVERRIDE_WIN_NAME 三个数据文件名常量 + RELAY_OWNER_VALUE）。
+      (2) 目录：`~/.workbuddy/skills/free-model-relay/`、`~/.workbuddy-ai/skills/free-model-relay/`
+      两根各一份（+ 3 个 .bak-* 历史目录）。
+      (3) 现存旧数据（仅 WB 根）：free-model-relay-state.json、free-model-relay-usage.json
+      （+ 一个 stray .stray-bak-20261010）；AI 根无。
+      (4) models.json 中**当前无** `relayOwner` 条目（无需数据侧标记迁移，但判定逻辑仍须双值兼容）。
+      (5) 其它 skill 与 AGENTS.md/FSTDD_CONSTITUTION.md **0 命中** ⇒ 无跨技能耦合。
+      (6) 分发物命中：install.sh / agenthub-install.sh / build_agenthub.py / README.md /
+      INTEGRATION.md / ROADMAP.md / pick.py / verify_payload.py / _sync_install_payload.py。
+
+what_changes:
+  - id: C1
+    description: |
+      **标识层改名（仓库内）**：SKILL.md（frontmatter `name`、标题、正文 15 处）、
+      relay_instruction.md（10 处）、scripts/pick_model.py（7 处）中所有 `free-model-relay`
+      字面统一改为 `agentinn`。使用「单次扫描 + 左边界」替换引擎，须幂等。
+    type: modified
+  - id: C2
+    description: |
+      **目录层改名（仓库外）**：skill 目录 `free-model-relay/` → `agentinn/`
+      （`~/.workbuddy/skills/` 与 `~/.workbuddy-ai/skills/` 两根）；`.fstdd` 项目与 git 仓随目录迁移。
+    type: modified
+  - id: C3
+    description: |
+      **真实可执行入口 `agentinn`**：新增零交互转发脚本（skill 内 `bin/agentinn` 为源，
+      安装器安装到 `~/.workbuddy/bin/agentinn` 并给 PATH 指引）。行为 = 原样转发到
+      `scripts/pick_model.py`（不复制任何业务逻辑）。文档/示例统一改为 `agentinn <cmd>`。
+    type: new
+  - id: C4
+    description: |
+      **数据文件名改名 + 自动迁移**：`free-model-relay-{state,usage,window}.json` →
+      `agentinn-{state,usage,window}.json`。首次运行**只读旧、写新、不删旧**（可回滚），迁移幂等。
+    type: new
+  - id: C5
+    description: |
+      **所有权标记双值兼容**：`RELAY_OWNER_VALUE` 新值 `agentinn`；所有权判定同时认
+      旧值 `free-model-relay` 与新值 `agentinn`（避免老条目被误判为 external）。
+    type: modified
+  - id: C6
+    description: |
+      **分发物同步**：install.sh / agenthub-install.sh / build_agenthub.py / README.md /
+      INTEGRATION.md / ROADMAP.md / pick.py / verify_payload.py / _sync_install_payload.py
+      同步改名（含安装路径 `$HOME/.workbuddy/skills/agentinn`）。
+    type: modified
+  - id: C7
+    description: |
+      **测试**：新增改名守卫测试（双向断言：新名存在 ∧ 旧名不存在；覆盖内容 + 文件名两维度；
+      断言幂等；排除区显式声明并逐条给理由）；补数据迁移 + 双标记兼容测试；全量回归。
+    type: new
+
+capabilities:
+  new:
+    - name: "agentinn-rename"
+      description: "标识/目录/命令入口改名：单次扫描替换引擎 + 真可执行入口 agentinn + 改名守卫断言"
+    - name: "data-file-migration"
+      description: "数据文件改名与自动迁移（只读旧写新）+ 所有权标记双值兼容"
+  modified: []
+
+constraints:
+  - "替换须用「单次扫描（正则 alternation）+ 左边界 `(?<![A-Za-z])`」引擎，**禁止**逐条 str.replace（rename-refactor 规程）"
+  - "替换引擎须**幂等**：对已改名文本重复执行结果不变"
+  - "**显式排除区**（历史快照，保留旧名，不参与断言）：`.fstdd/archive/**`、`deliverables/archive/**`、`deliverables/gstack/**`、`RELEASE-AUDIT.md`、`*.bak-*` 目录、`D:/tools/多层次agent/.workbuddy-ai/memory/**` 历史日志"
+  - "数据迁移须**只读旧、写新、不删旧**（可回滚）；旧文件保留为只读证据"
+  - "旧 owner 值 `free-model-relay` 必须**继续被识别**为 relay 所有（双值兼容，不得硬切换）"
+  - "`agentinn` 入口须零交互、纯转发（不复制业务逻辑）；Windows(Git Bash)/Linux/macOS 三平台可用"
+  - "除命名/路径/标记兼容外，**业务行为逐字不变**（调度/时段/向导语义不动）"
+  - "目录改名须在 Phase 4 最后执行（FSTDD 项目根即 skill 目录，提前改名会破坏 CLI 与 git）"
+
+stakeholders:
+  - "用户（本机唯一使用者；日常用 `agentinn <cmd>` 或经 AI 触发）"
+  - "WorkBuddy / WorkBuddy AI skill 加载器（按目录名与 frontmatter name 索引）"
+  - "FSTDD 流程（项目根 = skill 目录，改名须与归档顺序协调）"
+
+risk_areas:
+  - capability: "agentinn-rename"
+    risk: "漏改：安装位置、文件名维度、分发物（仓库外）最易漏 ⇒ 改完看着对、实际不能用"
+    mitigation: "枚举全层次清单；断言覆盖内容 + 文件名；仓库外实体单列 DELIVER 步骤并复验"
+  - capability: "agentinn-rename"
+    risk: "误伤历史快照（归档 change、审计报告、旧日志）"
+    mitigation: "显式排除清单 + 每条排除给理由；评审时逐条核实（约 1/3 评审发现为误报）"
+  - capability: "agentinn-rename"
+    risk: "替换规则自匹配 / 顺序问题（如 `agentinn` 命中 `agentinn-...`）"
+    mitigation: "单次扫描 + 左边界；幂等测试（重复执行不变）"
+  - capability: "data-file-migration"
+    risk: "迁移丢数据或不可回滚"
+    mitigation: "只读旧写新不删旧；迁移幂等；测试覆盖「旧存在→迁移」「旧缺失→新建」「两者并存→以新为准」"
+  - capability: "data-file-migration"
+    risk: "owner 标记硬切换 ⇒ 老 models.json 条目被判 external、被拒绝/覆盖"
+    mitigation: "双值兼容 + 测试（旧值/新值/并存三种）"
+  - capability: "agentinn-rename"
+    risk: "目录改名破坏 FSTDD 项目根与 git 仓"
+    mitigation: "改名放 DELIVER 最后一步；改名后复验 CLI 可用 + git status 干净 + 载荷一致"
+
+non_goals:
+  - "不改任何业务行为（调度策略/时段判定/向导语义逐字不变）"
+  - "不改 `.fstdd/archive/**` 与历史审计文档中的旧名（历史快照保留）"
+  - "不合并 Change 1（relay-v561-agenthub-wiring 已交付）"
+  - "不新增/删除子命令；`agentinn` 仅转发既有 CLI"
+
+critical:
+  is_critical: false
+  risk_assessment:
+    safety_critical: false
+    financial: false
+    cross_system: false
+
+anchoring:
+  level: L2
+  reference_changes: []
+  anchor_implementations: []
+
+success_criteria:
+  - "SC1：排除区之外，全库（内容 + 文件名）无 `free-model-relay` 残留（双向断言：新名存在 ∧ 旧名不存在）"
+  - "SC2：两根 skill 目录均为 `agentinn/`；`agentinn` 可执行入口存在且 PATH 可用"
+  - "SC3：`agentinn <subcommand>` 输出与 `python <skill>/scripts/pick_model.py <subcommand>` 逐字一致"
+  - "SC4：旧数据文件自动迁移为 `agentinn-*`（旧文件保留只读）；迁移幂等"
+  - "SC5：`relayOwner` 旧值 `free-model-relay` 与新值 `agentinn` 均被识别为 relay 所有"
+  - "SC6：替换引擎幂等（重复执行结果不变）"
+  - "SC7：新增改名守卫测试全绿 + 全量回归 rc=0"
+  - "SC8：历史快照（归档/审计/旧日志）保持旧名不动"

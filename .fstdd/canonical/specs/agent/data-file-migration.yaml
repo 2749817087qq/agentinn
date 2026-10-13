@@ -1,0 +1,63 @@
+# agent_spec.yaml — Agent 验证规格（Canonical YAML）
+# Change: relay-agentinn-rename
+# Capability: data-file-migration
+# coding 任务：CP 检查点对应 spec.yaml Scenario，assertions 对应 THEN
+
+meta:
+  task_id: "verify-data-file-migration"
+  change_id: "2026-10-13-relay-agentinn-rename"
+  task_type: code
+  system: "free-model-relay pick_model.py；被测 = compute_data_paths（新文件名）+ _migrate_legacy_data_files + RELAY_OWNER_VALUES 双值判定"
+  preconditions:
+    - "测试以 importlib 加载被测 pick_model.py；HOME 指向临时目录隔离，不触碰真实 models.json/state"
+    - "被测脚本输出仅 ASCII（与 run-all.py text=True 解码链路兼容）"
+    - "真实 HOME 哈希守卫（测试前后比对，确保未污染用户数据）"
+
+steps:
+  - id: "CP-1"
+    description: "SC-009 空数据根写操作生成 agentinn-*.json"
+    action: "空临时 HOME 执行 `free set --ids a`；列出数据根文件"
+    assertions:
+      - type: exit_code
+        expected: 0
+      - type: file_contains
+        expected: "agentinn-state.json"
+  - id: "CP-2"
+    description: "SC-010 旧文件存在 → 迁移为新文件且旧文件保留"
+    action: "临时 HOME 只放旧 free-model-relay-state.json；执行 `status`；检查新旧文件"
+    assertions:
+      - type: exit_code
+        expected: 0
+      - type: file_contains
+        expected: "agentinn-state.json"
+  - id: "CP-3"
+    description: "SC-011 旧缺失 → 正常返回"
+    action: "空临时 HOME 执行 `status`"
+    assertions:
+      - type: exit_code
+        expected: 0
+  - id: "CP-4"
+    description: "SC-012 新旧并存 → 以新为准（新文件不被旧覆盖）"
+    action: "临时 HOME 同时放新旧 state（内容不同）；执行 `status`；比对执行前后新文件字节"
+    assertions:
+      - type: exit_code
+        expected: 0
+  - id: "CP-5"
+    description: "SC-013 迁移幂等（二次执行不变）"
+    action: "连续两次执行 `status`；比对两次后新文件字节"
+    assertions:
+      - type: exit_code
+        expected: 0
+  - id: "CP-6"
+    description: "SC-014/015/016 owner 双值兼容 + 不误伤其它 owner"
+    action: "构造三态 models.json（旧值/新值/qoderFreeOwner）；执行所有权判定路径"
+    assertions:
+      - type: exit_code
+        expected: 0
+      - type: stdout_contains
+        expected: "relay"
+
+rollback:
+  steps:
+    - "删除临时 HOME 下生成的 agentinn-*.json（finally 清理）"
+    - "确认真实 ~/.workbuddy / ~/.workbuddy-ai 下 state/models.json 哈希未被改动"

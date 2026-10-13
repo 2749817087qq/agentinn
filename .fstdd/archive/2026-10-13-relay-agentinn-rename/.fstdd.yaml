@@ -1,0 +1,67 @@
+baseline:
+  at: '2026-10-12T23:57:22+00:00'
+  base_git_sha: 23f8b7d1966e02b9fa683ff089b3ff539d691ece
+  clock_source: system
+  established_by: gate1
+  node_id: DESKTOP-1MEQDMR
+change_id: 2026-10-13-relay-agentinn-rename
+complexity_score: 15
+current_phase: build
+design_adjustments:
+  count: 12
+long_range:
+  enabled: true
+  mode: full_auto
+  pre_auth_completed: true
+  pre_auth_timestamp: '2026-10-13T08:15:00+08:00'
+mode: thorough
+phases:
+  build:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-13T02:00:00+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 用户回复 continue（延续此前『确认全部』长程授权），批准 Gate 3
+    slices_completed:
+      S1:
+        new_tests: 4
+        status: done
+        tc_coverage: 4/4
+        verified_at: '2026-10-13T08:57:00+08:00'
+      S2:
+        new_tests: 2
+        status: done
+        tc_coverage: 2/2
+        verified_at: '2026-10-13T08:57:00+08:00'
+      S3:
+        new_tests: 8
+        status: done
+        tc_coverage: 8/8
+        verified_at: '2026-10-13T08:57:00+08:00'
+      S4:
+        new_tests: 2
+        status: done
+        tc_coverage: 2/2
+        verified_at: '2026-10-13T08:57:00+08:00'
+    status: completed
+  deliver:
+    status: pending
+  spec:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-13T00:00:53+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 确认
+    status: completed
+  understand:
+    confirmed_actor: ai
+    confirmed_at: '2026-10-12T23:57:22+00:00'
+    confirmed_by: dialog
+    confirmed_evidence: 确认 Gate 1
+    status: completed
+score_confidence: high
+status: archived
+task_type: code
+traceability:
+  spec_scenarios: 16
+  tc_cases: 16
+  test_functions: 16
+version: '3.0'

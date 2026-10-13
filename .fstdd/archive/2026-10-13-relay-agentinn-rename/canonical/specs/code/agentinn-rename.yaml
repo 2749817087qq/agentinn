@@ -1,0 +1,99 @@
+# spec.yaml — 行为规格（Canonical YAML）
+# Change: relay-agentinn-rename
+# Capability（新）: agentinn-rename
+# 配套 proposal: canonical/proposals/2026-10-13-relay-agentinn-rename.yaml
+
+meta:
+  capability: "agentinn-rename"
+  change_id: "2026-10-13-relay-agentinn-rename"
+  created: "2026-10-13T08:05:00+08:00"
+  confidence: high
+
+requirements:
+  - id: "REQ-ARN-001"
+    description: "仓库内标识改名：排除区外的 SKILL.md / relay_instruction.md / scripts/pick_model.py 不含旧名且含新名"
+    scenarios:
+      - id: "SC-001"
+        confidence: high
+        evidence: "proposal C1；侦察：SKILL.md 15 处 / relay_instruction.md 10 处 / pick_model.py 7 处。"
+        given: "改名后的 skill 仓库（排除区外）"
+        when: "在 SKILL.md / relay_instruction.md / scripts/pick_model.py 中检索旧名字面"
+        then: "SHALL 0 命中（排除区见 SC-008）"
+        and:
+          - "检索新名 `agentinn` SHALL 至少各命中 1 次（证明是改名而非删除）"
+      - id: "SC-002"
+        confidence: high
+        evidence: "proposal C1；SKILL.md frontmatter name 是 skill 加载器索引键。"
+        given: "改名后的 SKILL.md"
+        when: "读取 frontmatter"
+        then: "`name` SHALL == \"agentinn\""
+        and:
+          - "SKILL.md 正文标题与用法示例 SHALL 使用 `agentinn <cmd>` 形式"
+
+  - id: "REQ-ARN-002"
+    description: "文件名维度改名：排除区外的文件/目录名不含旧名"
+    scenarios:
+      - id: "SC-003"
+        confidence: high
+        evidence: "rename-refactor 第 3 步：「文件名也要扫」——最常被漏的维度。"
+        given: "改名后的仓库与安装目录"
+        when: "递归枚举排除区外的所有文件/目录名并检索旧名"
+        then: "SHALL 0 命中（含数据文件名与 skill 目录名）"
+        and:
+          - "`*.bak-*` 历史备份目录 SHALL 被排除（保留旧名）"
+
+  - id: "REQ-ARN-003"
+    description: "替换引擎幂等：对已改名文本重复执行结果不变"
+    scenarios:
+      - id: "SC-004"
+        confidence: high
+        evidence: "rename-refactor 第 2 步：不加左边界时重复执行会把 FSTDD→FFSTDD。"
+        given: "替换引擎与已改名的文本"
+        when: "对已改名文本再次执行替换引擎"
+        then: "输出 SHALL 与输入逐字一致（幂等）"
+        and:
+          - "对含旧名的文本执行一次 SHALL 得到新名，且左边界不误伤 `agentinn-*` 复合词"
+
+  - id: "REQ-ARN-004"
+    description: "真实可执行入口 agentinn：纯转发、零交互、与直调等价"
+    scenarios:
+      - id: "SC-005"
+        confidence: high
+        evidence: "proposal C3 / SC3；用户明确「启动命令就是 agentinn」。"
+        given: "已安装的 `agentinn` 入口（PATH 可用）"
+        when: "执行 `agentinn <subcommand> [args]`"
+        then: "输出 SHALL 与 `python <skill>/scripts/pick_model.py <subcommand> [args]` 逐字一致"
+        and:
+          - "退出码 SHALL 与直调一致"
+      - id: "SC-006"
+        confidence: high
+        evidence: "既有约束：pick_model.py 零交互（无 input()/TTY 判断）。"
+        given: "非交互上下文（stdin 为管道，无 TTY）"
+        when: "执行 `agentinn status`"
+        then: "SHALL 正常返回（不阻塞、不读 stdin）"
+        and:
+          - "入口脚本 SHALL NOT 复制任何业务逻辑（仅定位并转发）"
+
+  - id: "REQ-ARN-005"
+    description: "目录改名：两根 skill 目录均为 agentinn/"
+    scenarios:
+      - id: "SC-007"
+        confidence: high
+        evidence: "proposal C2 / SC2。"
+        given: "改名完成后的两个 WorkBuddy 根"
+        when: "列出 `skills/` 目录"
+        then: "SHALL 存在 `agentinn/` 且 SHALL NOT 存在 `free-model-relay/`"
+        and:
+          - "`agentinn/scripts/pick_model.py` SHALL 存在且可执行"
+
+  - id: "REQ-ARN-006"
+    description: "历史快照保留旧名（不误伤）"
+    scenarios:
+      - id: "SC-008"
+        confidence: high
+        evidence: "rename-refactor 第 5 步：约 1/3 评审发现是误报（把历史记录当残留）。"
+        given: "排除区（`.fstdd/archive/**`、`deliverables/archive/**`、`deliverables/gstack/**`、`RELEASE-AUDIT.md`、历史 memory 日志）"
+        when: "检索这些文件内容"
+        then: "SHALL 仍含旧名 `free-model-relay`（未被改写）"
+        and:
+          - "排除清单 SHALL 逐条附带理由（写入测试脚本注释）"

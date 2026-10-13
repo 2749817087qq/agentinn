@@ -1,0 +1,62 @@
+# agent_spec.yaml — Agent 验证规格（Canonical YAML）
+# Change: relay-agentinn-rename
+# Capability: agentinn-rename
+# coding 任务：CP 检查点对应 spec.yaml Scenario，assertions 对应 THEN
+
+meta:
+  task_id: "verify-agentinn-rename"
+  change_id: "2026-10-13-relay-agentinn-rename"
+  task_type: code
+  system: "free-model-relay skill（源码/文档/目录/入口）；被测 = 替换引擎幂等性 + 改名守卫断言 + agentinn 入口转发等价"
+  preconditions:
+    - "断言脚本自身须排除（否则检测字面量自检出自检）"
+    - "检测串用拼接构造（BAD = 'free-' + 'model-relay'），避免源码出现字面量"
+    - "排除区显式声明且逐条给理由；排除区不参与「无残留」断言"
+    - "文件名维度须单独扫（内容断言扫不到文件名）"
+
+steps:
+  - id: "CP-1"
+    description: "SC-001/002 仓库内标识改名（无旧名 + 有新名 + frontmatter name）"
+    action: "grep 排除区外的 SKILL.md/relay_instruction.md/pick_model.py 的旧名与新名；读 SKILL.md frontmatter"
+    assertions:
+      - type: file_contains
+        expected: "agentinn"
+      - type: exit_code
+        expected: 0
+  - id: "CP-2"
+    description: "SC-003 文件名维度（含数据文件名与 skill 目录名）"
+    action: "递归枚举排除区外的文件/目录名，检索旧名"
+    assertions:
+      - type: exit_code
+        expected: 0
+  - id: "CP-3"
+    description: "SC-004 替换引擎幂等"
+    action: "对已改名文本再次执行替换引擎，比对前后"
+    assertions:
+      - type: exit_code
+        expected: 0
+  - id: "CP-4"
+    description: "SC-005/006 agentinn 入口转发等价 + 零交互"
+    action: "执行 `agentinn status` 与 `python <skill>/scripts/pick_model.py status`，比对输出与退出码（隔离 HOME、非交互管道）"
+    assertions:
+      - type: exit_code
+        expected: 0
+      - type: stdout_contains
+        expected: "ok"
+  - id: "CP-5"
+    description: "SC-007 两根目录均为 agentinn/"
+    action: "列出两根 skills/ 目录"
+    assertions:
+      - type: exit_code
+        expected: 0
+  - id: "CP-6"
+    description: "SC-008 历史快照保留旧名（未误伤）"
+    action: "grep 排除区（归档/审计）确认仍含旧名"
+    assertions:
+      - type: file_contains
+        expected: "free-model-relay"
+
+rollback:
+  steps:
+    - "目录改名若出错：把 agentinn/ 改回 free-model-relay/（git 仓随目录移动，无损）"
+    - "数据迁移若出错：删除新 agentinn-*.json 即回滚到旧文件（旧文件未被改动）"

@@ -16,7 +16,7 @@
    在自己这一层把任务做完，并在报告里如实说明"第 2 步因无 Agent 工具未执行"。
 
 2. 子代理看得到 `<available_skills>` 列表，但里面每个 skill 只有一句话描述，
-   **不包含脚本路径**。所以只听说"用 free-model-relay"是不够的，必须给本文件路径。
+   **不包含脚本路径**。所以只听说"用 agentinn"是不够的，必须给本文件路径。
 
 ## 接棒流程（四步）
 
@@ -25,7 +25,7 @@
 v5.6.0 起 Step 0 是**统一启用向导**（时段 / 模型 / 归属 / AgentHub 在一处选定）。先判是否到期：
 
 ```bash
-python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" onboard-status
+agentinn onboard-status
 ```
 
 输出 `{due, confirmed_at, last_config_hash, current_config_hash, today, agenthub}`：
@@ -34,7 +34,7 @@ python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" onboard
 - **`due: true`**（未确认 / 跨自然日 / 数据漂移）⇒ 取预填数据并渲染向导：
 
 ```bash
-python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" onboard
+agentinn onboard
 ```
 
 输出 `{system_models[], custom_models[], agenthub}`：
@@ -46,7 +46,7 @@ python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" onboard
 用户调整 + 确认后落盘：
 
 ```bash
-python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" onboard set \
+agentinn onboard set \
   --json '{"groups":{"always_free":["hy3"],"platform_window":["hy4-preview"],"custom":["a"]},
            "custom_periods":{"a":{"start_hour":1,"end_hour":5}},
            "agenthub_pref":false}'
@@ -65,7 +65,7 @@ python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" onboard
      （调 `multihub-node-onboarding` skill，本机面板交互授权）；
   2. 发起后**立即**执行 `onboard agenthub-ack` 记录当日 —— 防打扰，**每自然日一次**：
      ```bash
-     python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" onboard agenthub-ack
+     agentinn onboard agenthub-ack
      ```
   3. `agenthub.onboarded == true` 或 `agenthub.prompted_on == 今天` ⇒ **跳过**，不再发起/提示。
 - 你（子代理）**通常没有提问能力**：如果你是主会话，渲染向导组件；如果你是被调起的子代理，
@@ -78,7 +78,7 @@ python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" onboard
 ### 1. 选模型
 
 ```bash
-python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" next --strategy auto --job <类型>
+agentinn next --strategy auto --job <类型>
 ```
 
 输出 JSON，取 `model` 字段即模型 ID。
@@ -104,7 +104,7 @@ Agent(model="<上一步拿到的 model ID>", prompt="...")
 ### 3. 记账（子代理结束后）
 
 ```bash
-python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" record --model <id> [--tokens <估算token>]
+agentinn record --model <id> [--tokens <估算token>]
 ```
 token 拿不到就省略，只记请求数也有意义。**不要编造 token 数字**，估算的要说明是估算。
 
@@ -144,7 +144,7 @@ P3 三路评审→`code-review` / `test-gen` / `doc-review`。
 **判断当前状态别猜，跑这个命令**：
 
 ```bash
-python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" window
+agentinn window
 ```
 
 关键字段：
@@ -154,7 +154,7 @@ python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" window
 | `in_free_window` | 现在是否免费时段 |
 | `expired` | 活动期是否已结束（`true` = 平台模型已不参与） |
 | `warning` | 活动结束的告警（含结束日期与延长方法）；未过期为 `null` |
-| `config_source` | 配置来源：`default` / `models.json` / `override`（覆盖文件 `~/.workbuddy/free-model-relay-window.json` 生效，优先级最高） |
+| `config_source` | 配置来源：`default` / `models.json` / `override`（覆盖文件 `~/.workbuddy/agentinn-window.json` 生效，优先级最高） |
 | `auto_source_now` | `--source auto` 本次解析成 `all` 还是 `custom` |
 | `next_change` | 下次时段切换时间与剩余分钟 |
 
@@ -207,6 +207,6 @@ python3 "$HOME/.workbuddy/skills/free-model-relay/scripts/pick_model.py" window
 
 往下派子代理时，把这一句原样写进它的 prompt：
 ```
-先读 ~/.workbuddy/skills/free-model-relay/relay_instruction.md 并按其接棒流程执行
+先读 ~/.workbuddy/skills/agentinn/relay_instruction.md 并按其接棒流程执行
 ```
 否则规则在你这一层就断了。

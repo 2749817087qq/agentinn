@@ -1,0 +1,64 @@
+#!/bin/sh
+# agentinn — 多模型接棒器 命令入口（零交互，纯转发到 scripts/pick_model.py）
+#
+# 本脚本不复制任何业务逻辑：只负责定位 skill 目录并 exec 转发。
+# 支持两种安装形态：
+#   1) 源位置：<skill>/bin/agentinn            -> skill 根 = 上级目录
+#   2) 安装位置：<prefix>/bin/agentinn          -> skill 根 = <prefix>/skills/<name>
+#
+# 形态 2 按 SKILL.md 的 frontmatter `name: agentinn` 定位，**不硬编码目录名**：
+#   · 目录改名（旧品牌名 -> agentinn）前后均可用；
+#   · 入口以绝对路径被调用时，$0 已确定 skill 前缀，故不受调用方 HOME 影响。
+set -e
+
+SELF="$0"
+# 解析 symlink 链，取真实路径
+while [ -L "$SELF" ]; do
+  _dir=$(cd "$(dirname "$SELF")" && pwd)
+  _link=$(readlink "$SELF")
+  case "$_link" in
+    /*) SELF="$_link" ;;
+    *) SELF="$_dir/$_link" ;;
+  esac
+done
+BIN_DIR=$(cd "$(dirname "$SELF")" && pwd)
+
+SKILL_DIR=""
+
+# (a) 源位置：<skill>/bin/agentinn
+if [ -f "$BIN_DIR/../scripts/pick_model.py" ]; then
+  SKILL_DIR=$(cd "$BIN_DIR/.." && pwd)
+fi
+
+# (b) 安装位置：在同级 skills/ 下按 frontmatter 定位（目录名可变）
+if [ -z "$SKILL_DIR" ]; then
+  for _base in "$BIN_DIR/../skills" "$HOME/.workbuddy/skills" "$HOME/.workbuddy-ai/skills"; do
+    [ -d "$_base" ] || continue
+    for d in "$_base"/*; do
+      [ -f "$d/scripts/pick_model.py" ] || continue
+      if grep -q "^name:[[:space:]]*agentinn" "$d/SKILL.md" 2>/dev/null; then
+        SKILL_DIR=$(cd "$d" && pwd)
+        break
+      fi
+    done
+    [ -n "$SKILL_DIR" ] && break
+  done
+fi
+
+if [ -z "$SKILL_DIR" ] || [ ! -f "$SKILL_DIR/scripts/pick_model.py" ]; then
+  echo "agentinn: cannot locate skill dir (expected <skill>/bin/agentinn or <prefix>/bin/agentinn)" >&2
+  exit 2
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  PY=python3
+elif command -v python >/dev/null 2>&1; then
+  PY=python
+elif [ -x "C:/Python311/python.exe" ]; then
+  PY="C:/Python311/python.exe"
+else
+  echo "agentinn: python interpreter not found" >&2
+  exit 127
+fi
+
+exec "$PY" "$SKILL_DIR/scripts/pick_model.py" "$@"

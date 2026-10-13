@@ -8,6 +8,10 @@
 *.json text eol=lf
 *.sh   text eol=lf
 
+# Windows 批处理必须 CRLF：cmd.exe 对 LF-only 的多行 for/if 块解析不稳（会挂起）
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+
 # 二进制（勿转换）
 *.png  binary
 *.jpg  binary
