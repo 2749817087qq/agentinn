@@ -61,4 +61,11 @@ else
   exit 127
 fi
 
-exec "$PY" "$SKILL_DIR/scripts/pick_model.py" "$@"
+# 原生 Windows python 无法解析 POSIX 路径（如 /c/Users/... -> c:\c\Users\... 导致找不到文件）
+# 在转发前用 cygpath 把脚本路径转成 Windows 形态；非 Git Bash 环境无 cygpath 则保持原样。
+SCRIPT_PATH="$SKILL_DIR/scripts/pick_model.py"
+if command -v cygpath >/dev/null 2>&1; then
+  SCRIPT_PATH=$(cygpath -w "$SCRIPT_PATH")
+fi
+
+exec "$PY" "$SCRIPT_PATH" "$@"
