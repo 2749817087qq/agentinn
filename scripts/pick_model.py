@@ -951,6 +951,242 @@ def build_free_candidate_pool(now=None, _scanner=None, _declared=None):
 
 
 # ══════════════════════════════════════════════════════════════
+# 成本闸门调度层（change: 2026-10-14-cost-gate-scheduler）
+# 能力：cost-gate-scheduler / free-pool-status-model / cmd-next-routing
+# 设计见 .fstdd/changes/2026-10-14-cost-gate-scheduler/{design.md,specs}
+# ══════════════════════════════════════════════════════════════
+
+# 成本闸门策略默认（安全默认：付费兜底关闭，绝不静默烧付费）
+COST_GATE_DEFAULTS = {
+    "enabled": True,
+    "capability_mode": "conservative",
+    "paid_fallback_source": None,
+    "default_required_caps": [],
+}
+COST_GATE_ENV_KEY = "AGENTINN_COST_GATE"
+
+# 免费池四态优先级（高 → 低）；scanner_down 优先于 rate_limited 优先于 depleted 优先于 active
+_FREE_POOL_PRIORITY = ["scanner_down", "rate_limited", "depleted", "active"]
+
+
+def load_cost_gate_policy(state, _env=None):
+    """从 STATE_FILE 的 cost_gate 键读取成本闸门策略对象。
+
+    安全默认（paid_fallback_source=None）：修改策略只改 state 即生效，无需改源码。
+    环境变量 AGENTINN_COST_GATE（合法 JSON 对象）优先，便于单测注入；非法 JSON
+    回落 state 默认并告警（不抛异常）。
+
+    返回 dict：{enabled, capability_mode, paid_fallback_source, default_required_caps}
+    """
+    env = _env if _env is not None else os.environ
+    raw = dict(COST_GATE_DEFAULTS)
+    if isinstance(state, dict) and isinstance(state.get("cost_gate"), dict):
+        for k in COST_GATE_DEFAULTS:
+            if k in state["cost_gate"]:
+                raw[k] = state["cost_gate"][k]
+    env_val = env.get(COST_GATE_ENV_KEY)
+    if env_val:
+        try:
+            env_cfg = json.loads(env_val)
+            if isinstance(env_cfg, dict):
+                for k in COST_GATE_DEFAULTS:
+                    if k in env_cfg:
+                        raw[k] = env_cfg[k]
+            else:
+                print(f"[warn] {COST_GATE_ENV_KEY} 非对象 JSON，回落 state 默认", file=sys.stderr)
+        except (ValueError, TypeError):
+            print(f"[warn] {COST_GATE_ENV_KEY} 非法 JSON，回落 state 默认", file=sys.stderr)
+    return raw
+
+
+def compute_free_pool_status(scanner, usage=None, qoder_limit=None, byok_fallback_ids=None):
+    """融合积分/时段/额度/限流四类信号，输出免费池四态（change: cost-gate-scheduler）。
+
+    参数：
+      scanner: scan_program_config() 的返回（available / free_ids / degraded / warnings）
+      usage:   load_usage() 返回（本变更仅预留，当前未用于状态判定）
+      qoder_limit: 可选 {rate_limited: bool, models: [ids]} —— 桥接源（Qoder-free）限流信号；
+                   rate_limited=True 即该源限流，models 中列出的 id 从 free_candidates 剔除。
+      byok_fallback_ids: 可选 list[str] —— scanner 失效时的 BYOK 兜底裸 id（build_free_candidate_pool 产出）。
+
+    返回 dict：
+      overall:   active | depleted | rate_limited | scanner_down（优先级见 _FREE_POOL_PRIORITY）
+      degraded:  bool（scanner 失效或限流时为 True）
+      by_source: dict —— 各免费源状态明细
+      free_candidates: list[str] —— 实际可用免费 id（剔除限流源、含 BYOK 兜底）
+    """
+    scanner = scanner or {}
+    available = bool(scanner.get("available"))
+    free_ids = list(scanner.get("free_ids") or [])
+    degraded = bool(scanner.get("degraded"))
+
+    # 桥接源限流信号
+    qoder_rate_limited = bool(isinstance(qoder_limit, dict) and qoder_limit.get("rate_limited"))
+    rate_limited_models = list((qoder_limit or {}).get("models") or []) if qoder_rate_limited else []
+
+    # 剔除限流源模型
+    rate_set = set(rate_limited_models)
+    candidates = [mid for mid in free_ids if mid not in rate_set]
+
+    # BYOK 兜底（scanner 失效时不静默空清单）
+    if byok_fallback_ids:
+        for mid in byok_fallback_ids:
+            if mid not in candidates:
+                candidates.append(mid)
+
+    # by_source 明细
+    by_source = {}
+    if available:
+        by_source["program"] = {
+            "state": "active" if free_ids else "depleted",
+            "models": list(free_ids),
+        }
+    if qoder_rate_limited:
+        by_source["qoder-free"] = {"state": "rate_limited", "models": list(rate_limited_models)}
+
+    # overall 判定（优先级）
+    if not available:
+        overall = "scanner_down"
+        degraded = True
+    elif qoder_rate_limited:
+        overall = "rate_limited"
+        degraded = True
+    elif not candidates:
+        overall = "depleted"
+    else:
+        overall = "active"
+
+    return {
+        "overall": overall,
+        "degraded": degraded,
+        "by_source": by_source,
+        "free_candidates": candidates,
+    }
+
+
+def _read_qoder_limit():
+    """读取 usage.json 的 Qoder-free 限流余量信号（生产路径；单测可经 cost_gate_select 注入）。"""
+    try:
+        usage = load_usage()
+        return usage.get("qoder_free_limit") or {}
+    except Exception:
+        return {}
+
+
+def _record_qoder_free_limit(usage, models, rate_limited=False, exhausted_until=None):
+    """记录 Qoder-free 限流余量（复用 usage.json 的 exhausted_until 同构，change: cost-gate-scheduler）。
+
+    成功发现 N 个模型 → remaining=N；明确限流 → remaining=0 + exhausted_until。
+    任何异常静默吞（D6 零阻断），不影响发现主流程。
+    """
+    try:
+        usage["qoder_free_limit"] = {
+            "remaining": 0 if rate_limited else len(models or []),
+            "models": list(models or []),
+            "rate_limited": bool(rate_limited),
+            "exhausted_until": exhausted_until,
+        }
+        save_usage(usage)
+    except Exception:
+        pass
+
+
+def _cg_required_caps(args):
+    """从 --job / --needs 推导成本闸门所需的模型能力键（与 WORK_TYPE_RULES 对齐）。"""
+    job = getattr(args, "job", None) or getattr(args, "needs", None)
+    if not job or job not in WORK_TYPE_RULES:
+        return []
+    return list(WORK_TYPE_RULES[job]["required"])
+
+
+def cost_gate_select(available, state, args, cost_gate, _scanner=None, _qoder_limit=None):
+    """成本闸门路由编排：free-first + 能力阈值 + 付费兜底（change: cost-gate-scheduler）。
+
+    参数：
+      available:  filter_available 后的可用模型列表
+      state:      load_state() 返回
+      args:       argparse 参数（含 job / needs）
+      cost_gate:  load_cost_gate_policy(state) 返回
+      _scanner:   可注入的扫描器（测试用）
+      _qoder_limit: 可注入的桥接源限流信号（测试用，否则读 usage.json）
+
+    返回 dict：
+      selected / cost_pool("free"|"paid"|None) / fell_back_to_paid / paid_reason /
+      free_pool_status / error / free_quota_exhausted
+      （error 非空时调用方应打印并 sys.exit(2)；本函数不直接 exit，便于单测。）
+    """
+    scanner = _scanner if _scanner is not None else _get_scanner()
+    usage = load_usage()
+    qoder_limit = _qoder_limit if _qoder_limit is not None else _read_qoder_limit()
+
+    raw_free = build_free_candidate_pool(_scanner=scanner)
+    byok = raw_free if not scanner.get("available") else None
+    fps = compute_free_pool_status(scanner, usage, qoder_limit, byok_fallback_ids=byok)
+    free_ids = set(fps["free_candidates"])
+    free_models = [m for m in available if m["id"] in free_ids]
+
+    cap_key = {"tool_call": "supportsToolCall", "images": "supportsImages",
+               "reasoning": "supportsReasoning"}
+    required_caps = _cg_required_caps(args)
+
+    def _satisfies(m, caps):
+        return all(m.get(cap_key.get(c, c), False) for c in caps)
+
+    free_ok = ([m for m in free_models if _satisfies(m, required_caps)]
+               if required_caps else list(free_models))
+
+    paid_fallback = cost_gate.get("paid_fallback_source")
+
+    # ① free-first：免费池有满足能力的模型 → 直接选免费
+    if free_ok:
+        return _cg_result(free_ok[0], "free", False, None, fps)
+
+    # ② 能力不足：保守模式下升级到付费池（若兜底已配置）
+    if free_models and not free_ok and required_caps:
+        if paid_fallback:
+            paid = _cg_paid_pool(available, free_ids)
+            if paid:
+                return _cg_result(paid[0], "paid", True, "capability_upgrade", fps)
+        # 无兜底：保守默认仍选免费（best-effort）—— 免费本就不烧平台额度，不静默烧付费
+        return _cg_result(free_models[0], "free", False, None, fps)
+
+    # ③ 免费池耗尽 / scanner 失效无 BYOK 兜底
+    if paid_fallback:
+        paid = _cg_paid_pool(available, free_ids)
+        if paid:
+            reason = "scanner_down" if not scanner.get("available") else "depleted"
+            return _cg_result(paid[0], "paid", True, reason, fps)
+
+    # ④ 无付费兜底：明确 error（与现状一致），绝不静默选付费
+    return {
+        "selected": None,
+        "cost_pool": None,
+        "fell_back_to_paid": False,
+        "paid_reason": None,
+        "free_pool_status": fps,
+        "error": "free pool exhausted and no paid fallback configured",
+        "free_quota_exhausted": True,
+    }
+
+
+def _cg_paid_pool(available, free_ids):
+    """付费池 = 可用模型中不在免费池内的部分。"""
+    return [m for m in available if m["id"] not in free_ids]
+
+
+def _cg_result(selected, cost_pool, fell_back, paid_reason, fps):
+    return {
+        "selected": selected,
+        "cost_pool": cost_pool,
+        "fell_back_to_paid": fell_back,
+        "paid_reason": paid_reason,
+        "free_pool_status": fps,
+        "error": None,
+        "free_quota_exhausted": False,
+    }
+
+
+# ══════════════════════════════════════════════════════════════
 # 工作类型规则引擎
 # ══════════════════════════════════════════════════════════════
 
@@ -2269,7 +2505,7 @@ def cmd_next(args):
         sys.exit(1)
 
     usage = load_usage()
-    strategy = args.strategy or "round-robin"
+    strategy = args.strategy or "cost-gate"
     state = load_state()
 
     # 免费模型白名单：只做**候选集过滤**，不参与打分/排序/轮询（design.md D4）。
@@ -2315,7 +2551,7 @@ def cmd_next(args):
         # 重建 state 时丢掉它会让白名单在"策略切换"时静默失效（TC-FMC-005 守这一点）。
         # v5.6.0：relay_onboard 同理必须保留，否则策略切换会静默抹掉向导确认结果。
         preserved = {k: v for k, v in state.items()
-                     if k.startswith("rr_") or k in (FREE_ALLOWLIST_KEY, RELAY_ONBOARD_KEY)}
+                     if k.startswith("rr_") or k in (FREE_ALLOWLIST_KEY, RELAY_ONBOARD_KEY, "cost_gate")}
         # 显式排序保证确定性：消除对 dict 迭代顺序的依赖（P3-21）
         preserved_sorted = {k: preserved[k] for k in sorted(preserved)}
         state = {"strategy": strategy, "index": 0, "history": state.get("history", []),
@@ -2323,6 +2559,11 @@ def cmd_next(args):
 
     selected = None
     violation = None  # 仅 auto 策略有意义：所选模型是否满足 job 必需能力
+    # 成本闸门输出契约（仅 cost-gate 策略填充；旧策略保持逐字不变以保全 28/28 回归）
+    cost_pool = None
+    fell_back_to_paid = False
+    paid_reason = None
+    free_pool_status = None
 
     if strategy == "round-robin":
         idx = state.get("index", 0) % len(available)
@@ -2386,6 +2627,28 @@ def cmd_next(args):
                    "reasoning": "supportsReasoning"}
         violation = any(not selected.get(cap_map.get(r, r), False) for r in rule["required"])
 
+    elif strategy == "cost-gate":
+        # 成本闸门默认路由：free-first + 能力阈值 + 付费兜底（change: cost-gate-scheduler）
+        cg = cost_gate_select(available, state, args, load_cost_gate_policy(state),
+                              _scanner=_get_scanner())
+        if cg.get("error"):
+            print(json.dumps({
+                "error": cg["error"],
+                "blocked": blocked,
+                "allowlist": allowlist_state,
+                "quota_alerts": alerts,
+                "free_quota_exhausted": cg["free_quota_exhausted"],
+                "free_pool_status": cg["free_pool_status"],
+                "hint": "配置 state.cost_gate.paid_fallback_source 启用付费兜底；"
+                        "或用 quota show 查配额 / clear-exhausted 恢复",
+            }, indent=2, ensure_ascii=False))
+            sys.exit(2)
+        selected = cg["selected"]
+        cost_pool = cg["cost_pool"]
+        fell_back_to_paid = cg["fell_back_to_paid"]
+        paid_reason = cg["paid_reason"]
+        free_pool_status = cg["free_pool_status"]
+
     # 记录历史
     state.setdefault("history", []).append({
         "model": selected["id"],
@@ -2414,7 +2677,7 @@ def cmd_next(args):
     source_warning = None
     if not in_free and selected.get("_source") == "platform" and getattr(args, "source", "auto") in ("platform", "all"):
         source_warning = "当前为收费时段，选中的是平台模型（可能产生费用）"
-    print(json.dumps({
+    out = {
         "model": selected["id"],
         "recommended_prefix": recommended_prefix,
         "name": selected.get("name", selected["id"]),
@@ -2444,7 +2707,14 @@ def cmd_next(args):
         "supportsImages": selected.get("supportsImages", False),
         "supportsReasoning": selected.get("supportsReasoning", False),
         "next_index": state.get("index", 0),
-    }, indent=2, ensure_ascii=False))
+    }
+    # 成本闸门输出契约：仅 cost-gate 策略附加四字段，避免改变旧策略输出形状（REQ-CNR-003）
+    if strategy == "cost-gate":
+        out["cost_pool"] = cost_pool
+        out["fell_back_to_paid"] = fell_back_to_paid
+        out["paid_reason"] = paid_reason
+        out["free_pool_status"] = free_pool_status
+    print(json.dumps(out, indent=2, ensure_ascii=False))
 
 
 def cmd_profile(args):
@@ -3711,6 +3981,7 @@ def discover_qoder_free(force=False, _probe=None):
               if isinstance(m, dict) and m.get("id")]
     if not models:
         _touch_qoder_free_discovery()
+        _record_qoder_free_limit(load_usage(), [])
         return {"ok": True, "discovered": 0, "reason": "empty", "models": []}
 
     before, err = _load_models_json_raw()
@@ -3747,6 +4018,7 @@ def discover_qoder_free(force=False, _probe=None):
     if perr:
         return {"ok": False, "reason": "persist_failed", "detail": perr, "discovered": 0}
     _touch_qoder_free_discovery()
+    _record_qoder_free_limit(load_usage(), models)
     return {
         "ok": True,
         "discovered": discovered,
