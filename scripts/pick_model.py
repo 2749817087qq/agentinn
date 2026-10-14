@@ -226,9 +226,15 @@ def now_utc():
 # WorkBuddy 平台内置模型 + 免费时段
 # ══════════════════════════════════════════════════════════════
 
-# 平台内置模型（不在 models.json 里，由 WorkBuddy 平台直接提供）
+# 平台内置模型「种子」：人工校订的**永久基线**（不在 models.json 里，由平台直接提供）
 # 实测可用：Agent(model="hy3") / Agent(model="hy4-preview") 均可启动子代理
-PLATFORM_MODELS = [
+#
+# ⚠️ 2026-10-15 起：本清单**不再等同于**平台可用模型全集。
+#    平台随附的其它模型（尤其免费模型，如 step-5-preview，宿主缓存 credits=x0.00）
+#    由宿主程序缓存扫描器动态发现后并入 PLATFORM_MODELS
+#    （见 _discover_platform_models / _refresh_platform_models）。
+#    种子条目始终保留，用于承载人工校订的 note / cost_multiplier。
+PLATFORM_MODELS_SEED = [
     {
         "id": "hy4-preview",
         "name": "Hy4 preview",
@@ -252,6 +258,11 @@ PLATFORM_MODELS = [
         "note": "平台免费模型",
     },
 ]
+
+# 运行期实际使用的平台模型清单 = 种子 + 扫描器发现的平台免费模型。
+# 先绑定为种子副本，保证模块导入早期（扫描器函数尚未定义时）任何引用都能取到；
+# 扫描器段定义完成后由 _refresh_platform_models() 重绑为并集（见该函数处）。
+PLATFORM_MODELS = list(PLATFORM_MODELS_SEED)
 
 # 平台模型免费额度时段（跨午夜时段）
 #
@@ -899,6 +910,10 @@ def scan_program_config(roots=None, now=None):
                 "window": window,
                 "valid_until": valid_until,
                 "source_root": root,
+                # 原始缓存条目（只读透传）：供 _discover_platform_models 读取
+                # supportsToolCall / supportsImages / supportsReasoning 等能力位。
+                # 扫描结果本身从不序列化 by_id，故不污染任何输出。
+                "raw": m,
             }
             # 双根合并：同 id 取更低 effective（保守）
             if mid in by_id:
@@ -926,12 +941,96 @@ _SCANNER_CACHE = None
 
 
 def _get_scanner(now=None):
-    """返回（并缓存）当前扫描结果；_SCANNER_CACHE 非 None 时直接复用。"""
+    """返回（并缓存）当前扫描结果；_SCANNER_CACHE 非 None 时直接复用。
+
+    首次（或缓存被测试重置后）完成扫描时，同步刷新 PLATFORM_MODELS，
+    使平台免费模型清单与扫描器保持一致（见 _refresh_platform_models）。
+    """
     global _SCANNER_CACHE
     if _SCANNER_CACHE is not None:
         return _SCANNER_CACHE
     _SCANNER_CACHE = scan_program_config(now=now)
+    _refresh_platform_models(_SCANNER_CACHE)
     return _SCANNER_CACHE
+
+
+def _discover_platform_models(scanner=None):
+    """从宿主程序缓存扫描器动态发现「平台内置免费模型」。
+
+    设计动机（2026-10-15）：PLATFORM_MODELS 原先硬编码 2 条，导致平台已随附的
+    免费模型（如 step-5-preview，宿主缓存 credits=x0.00）扫不出来，用户与调度
+    都看不到它。改为「种子 + 扫描器发现」后，平台增删免费模型无需改源码。
+
+    规则（保守，避免把收费模型误纳为免费）：
+      - 只取扫描器判定 free_now=True 的条目（effective credits == 0）
+      - 排除 custom-local:*（BYOK 自定义模型，另有通道）
+      - 排除已在种子中的 id（种子条目带人工校订的 note / cost_multiplier）
+      - 扫描器不可用 / 结构异常 → 返回 []（不阻断，静默回落种子）
+    """
+    if scanner is None:
+        scanner = _SCANNER_CACHE
+    if not isinstance(scanner, dict) or not scanner.get("available"):
+        return []
+    by_id = scanner.get("by_id") or {}
+    seed_ids = {m.get("id") for m in PLATFORM_MODELS_SEED}
+    out = []
+    for mid in scanner.get("free_ids") or []:
+        if (not isinstance(mid, str) or mid in seed_ids
+                or mid.startswith("custom-local:")):
+            continue
+        entry = by_id.get(mid) or {}
+        raw = entry.get("raw") or {}
+        out.append({
+            "id": mid,
+            "name": raw.get("name") or mid,
+            "vendor": "Platform",
+            "supportsToolCall": bool(raw.get("supportsToolCall", False)),
+            "supportsImages": bool(raw.get("supportsImages", False)),
+            "supportsReasoning": bool(raw.get("supportsReasoning", False)),
+            "context": None,
+            "cost_multiplier": entry.get("effective_credits"),
+            "note": "平台内置免费模型（由宿主程序缓存扫描器发现）",
+            "discovered": True,
+        })
+    return out
+
+
+def _refresh_platform_models(scanner=None):
+    """重绑 PLATFORM_MODELS = 种子 + 扫描器发现的平台免费模型。
+
+    幂等；任何异常都回落为「仅种子」，绝不因发现失败而清空平台模型。
+    """
+    global PLATFORM_MODELS
+    try:
+        discovered = _discover_platform_models(scanner)
+    except Exception:
+        discovered = []
+    PLATFORM_MODELS = list(PLATFORM_MODELS_SEED) + discovered
+    return PLATFORM_MODELS
+
+
+def _all_platform_ids():
+    """**时间不变**的平台模型 id 全集（种子 + 扫描器解析到的全部非 custom-local 条目）。
+
+    用途：孤儿用量判定 / 修复保护。**不得**改用 PLATFORM_MODELS —— 那是「当前免费」
+    的时变子集，模型由免费转收费后会掉出清单，其历史用量将被误判为孤立而删除。
+    """
+    ids = {m.get("id") for m in PLATFORM_MODELS_SEED if m.get("id")}
+    sc = _SCANNER_CACHE
+    if isinstance(sc, dict) and sc.get("available"):
+        for mid in (sc.get("by_id") or {}):
+            if isinstance(mid, str) and not mid.startswith("custom-local:"):
+                ids.add(mid)
+    return ids
+
+
+# 导入时立即并入一次：扫描器不可用 / 抛异常则静默回落种子。
+# 目的是让**任何**未先调用 _get_scanner() 的代码路径（如 cmd_inventory、
+# cmd_models_list）也能看到平台免费模型，避免"清单依赖调用顺序"的隐性坑。
+try:
+    _refresh_platform_models(_get_scanner())
+except Exception:
+    pass
 
 
 def build_free_candidate_pool(now=None, _scanner=None, _declared=None):
@@ -1972,18 +2071,35 @@ def load_declared_models():
                 "supportsReasoning": bool(m.get("supportsReasoning", False)),
             })
 
+    # 平台模型的「是否免费」不再一律为 True：扫描器可用时以它为准（权威、零 key）。
+    # 修复动机（2026-10-15）：hy4-preview 实际计费 x0.29，旧口径却恒报"免费时段内
+    # 不计费"，会在 onboarding 里被预勾选，用户可能在不知情下烧积分。
+    # 扫描器不可用 → 保守沿用旧口径（True），避免把免费误报成收费（宁可多提示）。
+    _sc = _get_scanner()
+    _sc_ok = isinstance(_sc, dict) and bool(_sc.get("available"))
+    _sc_by_id = (_sc.get("by_id") or {}) if _sc_ok else {}
     for m in PLATFORM_MODELS:
         mid = m["id"]
         if mid in seen:
             continue
         seen.add(mid)
+        if mid in _sc_by_id:
+            _e = _sc_by_id[mid]
+            _free = bool(_e.get("free_now"))
+            _eff = _e.get("effective_credits")
+            _reason = ("平台内置模型：扫描器判定当前免费"
+                       if _free else
+                       f"平台内置模型：扫描器判定当前计费（x{_eff}），非免费")
+        else:
+            _free = True
+            _reason = "平台内置模型（免费时段内不计费）"
         result.append({
             "id": mid,
             "name": m.get("name", mid),
             "vendor": m.get("vendor", "Platform"),
             "declared_in": DECLARED_IN_PLATFORM,
-            "default_free": True,
-            "default_free_reason": "平台内置模型（免费时段内不计费）",
+            "default_free": _free,
+            "default_free_reason": _reason,
             "supportsToolCall": bool(m.get("supportsToolCall", False)),
             "supportsImages": bool(m.get("supportsImages", False)),
             "supportsReasoning": bool(m.get("supportsReasoning", False)),
@@ -2980,12 +3096,16 @@ def _orphan_usage_ids(usage, custom_ids):
     """
     返回真正孤立的 usage 条目 id（模型已从 models.json 删除，用量无意义）。
 
-    必须排除平台模型 —— hy3 / hy4-preview 来自源码 PLATFORM_MODELS 常量，
-    本就不在 models.json 里，但它们是用量统计的合法记录。
+    必须排除平台模型 —— hy3 / hy4-preview / step-5-preview 等来自平台
+    （种子常量 + 宿主缓存扫描器发现），本就不在 models.json 里，
+    但它们是用量统计的合法记录。
     naive 判定「usage 里有但 models.json 里没有 = 孤立」会把它们当垃圾删掉，
     静默丢失平台模型历史用量（design.md Decision 2）。
+
+    ⚠️ 必须用 _all_platform_ids()（时间不变全集），不可用 PLATFORM_MODELS
+    （那是「当前免费」的时变子集）——否则模型转收费后历史用量会被误删。
     """
-    platform_ids = {m["id"] for m in PLATFORM_MODELS}
+    platform_ids = _all_platform_ids()
     return [
         mid for mid in usage.get("models", {})
         if mid not in custom_ids and mid not in platform_ids
@@ -3019,7 +3139,7 @@ def _apply_doctor_fixes(usage, orphans, fix_unsafe, custom_ids):
       --fix-unsafe 才清限流 + 重置配额 —— 会让不可用模型立即重新参与调度
     """
     fixed = {"orphan_removed": [], "rate_limit_cleared": [], "quota_reset": []}
-    platform_ids = {m["id"] for m in PLATFORM_MODELS}
+    platform_ids = _all_platform_ids()
 
     try:
         with usage_file_lock():
@@ -5015,7 +5135,7 @@ def cmd_onboard_set(args):
                       if isinstance(payload.get("custom_periods"), dict) else {})
     agenthub_pref = bool(payload.get("agenthub_pref"))
 
-    platform_ids = {m["id"] for m in PLATFORM_MODELS}
+    platform_ids = _all_platform_ids()
 
     # 1 + 2：逐自定义/桥接模型写 window 覆写；系统模型跳过（宿主规范为准）
     written = {}
