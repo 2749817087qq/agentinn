@@ -758,40 +758,131 @@ PROGRAM_CACHE_FILENAME = "acc-product-config-v3.json"
 
 
 def _parse_credits(value):
-    """解析 'x0.00' / 'x0.50' 形式的 credit 字符串 → float。
+    """解析 credit 字符串 → float。支持两种前缀（2026-10-15 实测双根缓存）：
+      - 'x' 前缀：models[].credits 的 'x0.29' / 'x0.00' 形式（v5.5.0 起）；
+      - 'x' 后缀：modelPromotions[].discount.discountedCredits 的 '0.50x' / '0.00x' / '0x'
+        形式（WB 根实测，v5.5.0 时未覆盖 → 促销折扣链路整体哑火，见 change
+        2026-10-15-platform-model-discovery C5）。
 
-    非字符串 / 不以 'x' 开头 / 无法解析 → 返回 None（调用方按缺失处理）。
+    非字符串 / 空前缀后无数 / 两种前缀都不匹配（含 '0.34 credits' 带后缀的
+    AI 根 models 格式，属 known-degraded，另开 change）→ 返回 None（调用方按
+    缺失处理，绝不猜测为 0——保守不可逆）。
     """
     if not isinstance(value, str):
         return None
     s = value.strip()
-    if not s.lower().startswith("x"):
+    if not s:
         return None
+    low = s.lower()
+    if low.startswith("x"):
+        try:
+            return float(s[1:])
+        except ValueError:
+            return None
+    if low.endswith("x") and len(s) > 1:
+        try:
+            return float(s[:-1])
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_seg_time(v):
+    """解析时段值：int（历史 fixture）/"HH:MM" 字符串（WB 根实测）/纯数字字符串 → 数值。
+
+    bool 是 int 子类，显式排除；无法解析 → None（调用方按无促销处理，不猜）。
+    "HH:MM" 归一为小时浮点（分钟除以 60，round 4 位）——支持 '7:50' 分钟级边界。
+    """
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if ":" in s:
+            try:
+                h, m = s.split(":", 1)
+                return round(int(h) + int(m) / 60.0, 4)
+            except ValueError:
+                return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
+def _seg_hit(seg, hour):
+    """单段窗口命中判定：hour ∈ [start, end)（跨午夜 start>end 时取补集）。"""
+    s, e = seg["start"], seg["end"]
+    if s < e:
+        return s <= hour < e
+    return hour >= s or hour < e
+
+
+def _parse_schedule_window(schedule):
+    """解析 modelPromotions[].schedule → 窗口；支持三种实测形态（2026-10-15 双根缓存）：
+
+      - daily[].start/end 为 "HH:MM" 字符串（WB 根，如 glm-5.2 的 "23:00"-"7:50"）或
+        int（v5.5.0 历史 fixture，向后兼容）；
+      - daily 为多段（WB 根 hy4-preview 夜间促销 [{23:00-23:59},{00:00-08:00}]）→
+        返回段列表，任一段命中即生效；
+      - 无 daily 但有 validFrom/validUntil（AI 根促销形态）→ 全天窗口 {start:0, end:24}
+        （时段不限制，只有效期限制）。
+
+    返回值：单段 → {start,end} dict（保持既有扫描测试对 window 的断言形态）；
+    多段 → [{start,end},...]；结构不认识 / 任一段无法解析 → None（调用方按无促销
+    处理——保守方向：不因解析失败放大或缩小促销）。
+    """
+    if not isinstance(schedule, dict):
+        return None
+    daily = schedule.get("daily")
+    if isinstance(daily, list) and daily:
+        segs = []
+        for seg in daily:
+            if not isinstance(seg, dict):
+                return None
+            s = _parse_seg_time(seg.get("start"))
+            e = _parse_seg_time(seg.get("end"))
+            if s is None or e is None:
+                return None
+            segs.append({"start": s, "end": e})
+        if len(segs) == 1:
+            return segs[0]
+        return segs
+    # 无 daily（或空列表）：仅 validFrom/validUntil 的促销按全天窗口处理
+    if schedule.get("validFrom") or schedule.get("validUntil"):
+        return {"start": 0, "end": 24}
+    return None
+
+
+def _promo_date(value):
+    """解析促销有效期：date-only（'2026-10-12'）或带时区完整 ISO
+    （'2026-10-12T00:00:00+08:00'，宿主缓存实测形态，date.fromisoformat 3.11
+    不直接接受 → 截取前 10 位日期部分再解析）。都无法解析 → None（调用方
+    跳过该校验，不猜）。
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    s = value.strip()
     try:
-        return float(s[1:])
+        return date.fromisoformat(s)
+    except ValueError:
+        pass
+    try:
+        return date.fromisoformat(s[:10])
     except ValueError:
         return None
 
 
-def _parse_schedule_window(schedule):
-    """解析 modelPromotions[].schedule.daily[0] → {start, end} 或 None（支持跨午夜）。"""
-    if not isinstance(schedule, dict):
-        return None
-    daily = schedule.get("daily")
-    if not isinstance(daily, list) or not daily:
-        return None
-    seg = daily[0]
-    if not isinstance(seg, dict):
-        return None
-    start = seg.get("start")
-    end = seg.get("end")
-    if not isinstance(start, int) or not isinstance(end, int):
-        return None
-    return {"start": start, "end": end}
-
-
 def _promo_active(promo, now):
-    """判断某条 modelPromotion 在 now 时刻是否 active；返回 (active, factor|None)。"""
+    """判断某条 modelPromotion 在 now 时刻是否 active；返回 (active, factor|None)。
+
+    有效期字段位置双读：promo 顶层（v5.5.0 历史 fixture 形态）与
+    promo.schedule 内（双根宿主缓存实测形态，2026-10-15 发现旧代码只读顶层
+    → 真实数据有效期从未生效）。hour 取 now.hour + now.minute/60（分钟级精度，
+    匹配 "7:50" 这类分钟边界，end 排他）；多段窗口任一段命中即 active。
+    """
     if not isinstance(promo, dict):
         return False, None
     schedule = promo.get("schedule")
@@ -802,26 +893,20 @@ def _promo_active(promo, now):
     factor = _parse_credits(discount.get("discountedCredits"))
     if factor is None:
         return False, None
-    valid_from = promo.get("validFrom")
-    valid_until = promo.get("validUntil")
-    if valid_from:
-        try:
-            if now.date() < date.fromisoformat(valid_from):
-                return False, factor
-        except (ValueError, TypeError):
-            pass
-    if valid_until:
-        try:
-            if now.date() > date.fromisoformat(valid_until):
-                return False, factor
-        except (ValueError, TypeError):
-            pass
-    hour = now.hour
-    s, e = window["start"], window["end"]
-    if s < e:
-        in_window = s <= hour < e
+    sched = schedule if isinstance(schedule, dict) else {}
+    valid_from = promo.get("validFrom") or sched.get("validFrom")
+    valid_until = promo.get("validUntil") or sched.get("validUntil")
+    d_from = _promo_date(valid_from)
+    d_until = _promo_date(valid_until)
+    if d_from is not None and now.date() < d_from:
+        return False, factor
+    if d_until is not None and now.date() > d_until:
+        return False, factor
+    hour = now.hour + now.minute / 60.0
+    if isinstance(window, list):
+        in_window = any(_seg_hit(seg, hour) for seg in window)
     else:
-        in_window = hour >= s or hour < e
+        in_window = _seg_hit(window, hour)
     return in_window, factor
 
 
