@@ -83,6 +83,8 @@ agentinn next --strategy auto --job <类型>
 
 输出 JSON，取 `model` 字段即模型 ID。
 
+**模型 ID 前缀（`model` vs `model_full`，v5.7.4 起）**：`model` 是**裸 ID**（内部恒为裸 canonical，已自动剥离 `custom-local:` 前缀，杜绝双重前缀）；`recommended_prefix` 是脚本按 `_source` 派生出的前缀（`custom-local:` 或空）；`model_full` = `recommended_prefix` + `model`，即**已拼好前缀的成品 ID**。**二选一、禁止叠加**：要么直接把 `model_full` 当作模型 ID 传；要么自己用 `custom-local:` + `model` 拼（平台模型 `recommended_prefix` 为空，拼出来仍是裸 ID）。**绝不要** `custom-local:` + `model_full`，否则变双重前缀、路由失败。自定义/BYOK 模型（`_source=custom`）必须带 `custom-local:` 前缀，漏拼会被平台**静默路由到收费款**——优先用 `model_full` 省心。
+
 **排障（版本 ≥ v5，字段语义已修正）**：
 - 命令 **exit 2** 且输出 `error: all models unavailable` → 所有模型都超限/限流。
   看 `blocked` 数组里每个模型的 `reason`，用 `clear-exhausted` 恢复或等限流到期。
@@ -96,10 +98,19 @@ agentinn next --strategy auto --job <类型>
 
 ### 2. 传给 Agent
 
+推荐直接用 `model_full`（已带前缀的成品 ID）：
+
 ```python
-Agent(model="<上一步拿到的 model ID>", prompt="...")
+Agent(model="<上一步拿到的 model_full>", prompt="...")
 ```
-若你没有 Agent 工具，见上面「框架限制」第 1 条。
+
+也可等价地自己拼（平台模型 `recommended_prefix` 为空，拼出来仍是裸 ID）：
+
+```python
+Agent(model=(recommended_prefix + model), prompt="...")
+```
+
+**禁止叠加**：对 `model_full` 不要再前缀 `custom-local:`，否则变双重前缀、路由失败。若你没有 Agent 工具，见上面「框架限制」第 1 条。
 
 ### 3. 记账（子代理结束后）
 

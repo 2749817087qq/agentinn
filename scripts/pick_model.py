@@ -2051,6 +2051,29 @@ def record_usage(usage, model_id, tokens=0):
 # 基础工具函数
 # ══════════════════════════════════════════════════════════════
 
+# 自定义/BYOK 模型在调用侧需要带 custom-local: 前缀；平台模型不带。
+# 前缀的唯一权威来源是 cmd_next 的 recommended_prefix（按 _source 派生）。
+# 以下常量与归一函数用于从数据入口消除"前缀写进了 models.json id"导致的
+# 双重前缀（R2）以及边界漂移（CAP-PREFIX-GUARD）。
+_PREFIX_CANONICAL = "custom-local:"
+
+def normalize_model_id(raw_id):
+    """幂等（循环）剥离 custom-local: 前缀，返回裸 canonical id。
+
+    防御两类错误（CAP-PREFIX-GUARD）：
+      - R2 双重前缀：custom-local:custom-local:foo → 循环剥离至 foo（消除任意嵌套层数）；
+      - 数据入口归一：models.json 无论裸填或带前缀，内部 id 恒为裸，杜绝调用方
+        拼接出 custom-local:custom-local:foo（路由失败/错乱）。
+    裸 id（无前缀）原样返回；非字符串 / None 原样返回（上层做空值校验）。
+    """
+    if not isinstance(raw_id, str):
+        return raw_id
+    s = raw_id
+    while s.startswith(_PREFIX_CANONICAL):
+        s = s[len(_PREFIX_CANONICAL):]
+    return s
+
+
 def load_models(source="custom"):
     """
     加载模型。source 决定模型来源：
@@ -2084,12 +2107,20 @@ def load_models(source="custom"):
                     continue
                 if m.get("vendor") == "Custom":
                     m = dict(m)
+                    m["id"] = normalize_model_id(m.get("id"))
+                    if not m.get("id"):
+                        # 全被前缀剥离成空（如 id 恰为 "custom-local:"）→
+                        # 按既有"id 为空则跳过"口径跳过，防止落进脏条目
+                        continue
                     m["_source"] = "custom"
                     result.append(m)
 
     if source in ("platform", "all"):
         for m in PLATFORM_MODELS:
             m = dict(m)
+            m["id"] = normalize_model_id(m.get("id"))
+            if not m.get("id"):
+                continue
             m["_source"] = "platform"
             result.append(m)
 
@@ -2133,8 +2164,8 @@ def load_declared_models():
         for m in all_models:
             if not isinstance(m, dict) or not m.get("id"):
                 continue
-            mid = m["id"]
-            if not isinstance(mid, str) or mid in seen:
+            mid = normalize_model_id(m.get("id"))
+            if not isinstance(mid, str) or not mid or mid in seen:
                 continue
             # freeWindow 配置元素不是模型（与 load_models 同一排除口径）
             if "freeWindow" in m:
@@ -2880,6 +2911,7 @@ def cmd_next(args):
         source_warning = "当前为收费时段，选中的是平台模型（可能产生费用）"
     out = {
         "model": selected["id"],
+        "model_full": recommended_prefix + selected["id"],
         "recommended_prefix": recommended_prefix,
         "name": selected.get("name", selected["id"]),
         "source": selected.get("_source", "custom"),
