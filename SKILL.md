@@ -60,7 +60,9 @@ WorkBuddy 的 Agent 工具 `model` 参数接受模型 ID。`models.json` 中的�
 
 **v5.6 新增**：
 - **统一启用向导（Step 0 单次渲染）** —— 时段 / 模型 / 归属 / AgentHub 合并到一个控件（4 段）；新增 `onboard`（读）/ `onboard set`（写）/ `onboard-status`（due 判定 = 未确认 / 跨自然日 / 数据漂移），`next` / `inventory` 透传 `onboard_due`。**系统模型时段用宿主规范（只读）；自定义 / 桥接模型逐模型可选时段**。见下文「统一启用向导」。
-- **Qoder-free 本地网关源** —— 自动发现本地 OpenAI 兼容网关（Qoder-free）并纳入默认免费候选池，`qoder-free sync` 强制刷新 / `qoder-free status` 查可达性与已发现模型。见下文「Qoder-free 本地网关源」。
+- **Qoder 上游 = qoderclicn 桥（不是 qoder-free 网关）** —— 上游由**运行中的 `qoderclicn`** 搭桥，不是另起一个 OpenAI 兼容网关。
+  CLI 固定路径 `%USERPROFILE%\.qoder-cn\bin\qoderclicn\qoderclicn.exe`（稳定软链，真实版本见同目录 `version.txt`，当前 1.1.73）；PATH 入口 `~/.qoder-cn/entry/qodercn.cmd`（PowerShell 分发器 `qodercn-dispatcher.ps1`，CLI 解析序：`$env:QODERCN_CLI_BIN` → PATH 中的 `qoderclicn` → 上述固定路径）。
+  `qoder-free`（`127.0.0.1:8210`）**已弃用、未在用**：`qoder-free status` 返回 `reachable:false` 属预期，**不要**再把它当上游端点、默认免费池来源或「桌面 `:8210/panel` 授权」入口；该子命令仅保留作 legacy 探测。
 
 ## 统一启用向导（Step 0，v5.6.0 —— 单次渲染）
 
@@ -82,7 +84,7 @@ agentinn onboard set --json '{"groups":{...},"custom_periods":{...},"agenthub_pr
 - **系统模型**（`system_models`）时段由宿主程序规范定义 ⇒ **只读**（`read_only:true`），用户不可编辑，
   `onboard set` 也**不会**为其写覆写（`skipped_system_models` 回报）。
 - **自定义渠道模型**（`custom_models`，含 BYOK 与桥接）⇒ **逐模型可选时段**；桥接模型
-  （`bridged:true`，如 qoder-free / OW Bridge / OpenCode）已尝试扫描其免费时段并预填，
+  （`bridged:true`，如 OW Bridge / qoderclicn 桥 / OpenCode）已尝试扫描其免费时段并预填，
   扫不到则回落 all-day（`{start_hour:0,end_hour:0}` 恒真语义）。
 
 ### 四段结构
@@ -91,7 +93,7 @@ agentinn onboard set --json '{"groups":{...},"custom_periods":{...},"agenthub_pr
 |----|------|----------|
 | ① 始终免费 | 系统模型（扫描器判定全天免费，如 hy3） | 时段**只读** |
 | ② 平台时段 | 系统模型（宿主规范时段，如 hy4-preview） | 时段**只读** |
-| ③ 自定义渠道 | BYOK + 桥接（qoder-free / OW Bridge / OpenCode 等） | 时段**逐模型可选**（滚轮） |
+| ③ 自定义渠道 | BYOK + 桥接（qoderclicn 桥 / OW Bridge / OpenCode 等） | 时段**逐模型可选**（滚轮） |
 | ④ AgentHub | 偏好 toggle + 「立即开通」按钮 | 偏好可切；开通走 multihub skill |
 
 ### 组件源码（内联 HTML，零外部依赖）
