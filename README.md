@@ -47,7 +47,7 @@ WorkBuddy 的 Agent 工具 `model` 参数接受模型 ID。`models.json` 中的�
 | `next` / `record` | 调度选模型 / 记录用量与额度告警 |
 | `origins` | 列出模型来源（relay / 桥接 / 平台） |
 | `relay-window` | 时段确认窗口回传处理 |
-| `qoder-free sync` / `qoder-free status` | **legacy**：探测已弃用的 Qoder-free 本地网关（`127.0.0.1:8210`）。Qoder 上游现为**运行中的 `qoderclicn` 桥**（固定路径 `%USERPROFILE%\.qoder-cn\bin\qoderclicn\qoderclicn.exe`），网关未在用、`reachable:false` 属预期 |
+| `qoder-free sync` / `qoder-free status` | 刷新 / 探活 **qoderclicn 桥**（OpenAI 兼容端点 `http://127.0.0.1:8210/v1`，实现为 `D:/tools/qoder-free`：每账号 Node worker + 内存 hook 运行中的 qoderclicn）。子命令名沿用历史；网关未启动时 `reachable:false` 属预期 |
 
 ## 触发词
 

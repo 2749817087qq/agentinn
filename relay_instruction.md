@@ -42,8 +42,9 @@ agentinn onboard
 - `system_models` 时段由**宿主程序规范**定义 ⇒ **只读**（`read_only:true`），**不可编辑**。
 - `custom_models`（BYOK + 桥接）⇒ **逐模型可选时段**；桥接项（`bridged:true`，如 OW Bridge /
   qoderclicn 桥）已尝试扫描其免费时段并预填，扫不到则 all-day（`{start_hour:0,end_hour:0}`）。
-  Qoder 侧的桥接对象是**运行中的 `qoderclicn`**（固定路径 `%USERPROFILE%\.qoder-cn\bin\qoderclicn\qoderclicn.exe`），
-  不是 `qoder-free` 本地网关——后者已弃用、未在用（`reachable:false` 属预期），不再作为桥接来源。
+  Qoder 侧的桥接对象是**从运行中的 `qoderclicn` 搭的桥**，对外是 OpenAI 兼容端点
+  `http://127.0.0.1:8210/v1`（`/v1/chat/completions` + `/v1/models`）；网关未启动时
+  `qoder-free status` 报 `reachable:false` 属预期。
 
 用户调整 + 确认后落盘：
 

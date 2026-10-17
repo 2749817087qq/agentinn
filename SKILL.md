@@ -60,9 +60,11 @@ WorkBuddy 的 Agent 工具 `model` 参数接受模型 ID。`models.json` 中的�
 
 **v5.6 新增**：
 - **统一启用向导（Step 0 单次渲染）** —— 时段 / 模型 / 归属 / AgentHub 合并到一个控件（4 段）；新增 `onboard`（读）/ `onboard set`（写）/ `onboard-status`（due 判定 = 未确认 / 跨自然日 / 数据漂移），`next` / `inventory` 透传 `onboard_due`。**系统模型时段用宿主规范（只读）；自定义 / 桥接模型逐模型可选时段**。见下文「统一启用向导」。
-- **Qoder 上游 = qoderclicn 桥（不是 qoder-free 网关）** —— 上游由**运行中的 `qoderclicn`** 搭桥，不是另起一个 OpenAI 兼容网关。
-  CLI 固定路径 `%USERPROFILE%\.qoder-cn\bin\qoderclicn\qoderclicn.exe`（稳定软链，真实版本见同目录 `version.txt`，当前 1.1.73）；PATH 入口 `~/.qoder-cn/entry/qodercn.cmd`（PowerShell 分发器 `qodercn-dispatcher.ps1`，CLI 解析序：`$env:QODERCN_CLI_BIN` → PATH 中的 `qoderclicn` → 上述固定路径）。
-  `qoder-free`（`127.0.0.1:8210`）**已弃用、未在用**：`qoder-free status` 返回 `reachable:false` 属预期，**不要**再把它当上游端点、默认免费池来源或「桌面 `:8210/panel` 授权」入口；该子命令仅保留作 legacy 探测。
+- **Qoder 上游 = qoderclicn 桥（OpenAI 兼容端点）** —— 上游是**从运行中的 `qoderclicn` 搭的桥**：不是官方 API，也不是「第三方 Qoder-free 产品」。
+  - **形态**：本机 OpenAI 兼容网关 `http://127.0.0.1:8210/v1`（`POST /v1/chat/completions` 流式/非流式、`GET /v1/models`）；实现 = `D:/tools/qoder-free`（Go 单二进制，源自 cli2api 的 per-account Node worker + qodercli hook 方案），面板 `http://127.0.0.1:8210/panel/`。
+  - **桥接方式**：每账号一个 Node worker（端口自 `worker_base_port`=33100 起，每 worker 独立 HOME，配置目录 `<worker home>/.qoder-cn`），加载 `worker/node_modules/@qodercn-ai/qoderclicn/bundle/qoderclicn.js`（**钉版 1.1.32**，由 `npm ci --prefix worker` 装入）并**在内存里打 hook** —— 即驱动运行中的 qoderclicn，而非调官方 HTTP API。
+  - ⚠️ `qoder_cn_cli_js` 留空时走 `autoCLIJS`，**只找 worker/node_modules**，不会用系统另装的 `%USERPROFILE%\.qoder-cn\bin\qoderclicn\qoderclicn.exe`（那份 1.1.73 是独立 CLI，与本链路无关）。
+  - 模型 ID 加 `cn:` / `global:` 前缀可强制区域。网关未启动时 `qoder-free status` 返回 `reachable:false` 属预期 —— 该子命令名沿用历史，实际是**这座桥的探活入口**（发现逻辑已直指上述 OpenAI 兼容端点，无需改代码）。
 
 ## 统一启用向导（Step 0，v5.6.0 —— 单次渲染）
 
