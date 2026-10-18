@@ -758,15 +758,17 @@ PROGRAM_CACHE_FILENAME = "acc-product-config-v3.json"
 
 
 def _parse_credits(value):
-    """解析 credit 字符串 → float。支持两种前缀（2026-10-15 实测双根缓存）：
-      - 'x' 前缀：models[].credits 的 'x0.29' / 'x0.00' 形式（v5.5.0 起）；
-      - 'x' 后缀：modelPromotions[].discount.discountedCredits 的 '0.50x' / '0.00x' / '0x'
-        形式（WB 根实测，v5.5.0 时未覆盖 → 促销折扣链路整体哑火，见 change
+    """解析 credit 字符串 → float。支持多种形态（2026-10-15 / 2026-10-18 双根缓存实测）：
+
+      - 'x' 前缀 + 纯数字：models[].credits 的 'x0.29' / 'x0.00'（WB 根，v5.5.0 起）；
+      - 'x' 前缀 + 数字 + 单位尾巴：WorkBuddy AI 根 models[].credits 的
+        'x0.34 credits'（带 ' credits' 单位后缀）→ 剥离尾单位后解析；
+      - 'x' 后缀：modelPromotions[].discount.discountedCredits 的 '0.50x' /
+        '0.00x' / '0x'（WB 根促销，v5.5.0 时未覆盖 → 折扣链路哑火，见 change
         2026-10-15-platform-model-discovery C5）。
 
-    非字符串 / 空前缀后无数 / 两种前缀都不匹配（含 '0.34 credits' 带后缀的
-    AI 根 models 格式，属 known-degraded，另开 change）→ 返回 None（调用方按
-    缺失处理，绝不猜测为 0——保守不可逆）。
+    保守不变量：非字符串 / 空 / 剥离尾单位后仍非数字 → 返回 None（调用方按
+    缺失处理，绝不猜测为 0——避免把收费当免费这类不可逆错误）。
     """
     if not isinstance(value, str):
         return None
@@ -775,13 +777,15 @@ def _parse_credits(value):
         return None
     low = s.lower()
     if low.startswith("x"):
+        num = re.split(r"[^0-9.]", s[1:], 1)[0].strip()
         try:
-            return float(s[1:])
+            return float(num)
         except ValueError:
             return None
     if low.endswith("x") and len(s) > 1:
+        num = re.split(r"[^0-9.]", s[:-1], 1)[0].strip()
         try:
-            return float(s[:-1])
+            return float(num)
         except ValueError:
             return None
     return None
@@ -969,7 +973,7 @@ def scan_program_config(roots=None, now=None):
             mid = m["id"]
             base = _parse_credits(m.get("credits"))
             if base is None:
-                degraded.append(f"模型 {mid} 缺 credits 字段，已跳过")
+                degraded.append(f"模型 {mid} credits 字段缺失或不可解析，已跳过")
                 continue
             factor = 1.0
             valid_until = None
@@ -2607,7 +2611,7 @@ def cmd_origins(args):
         tool, detail = _detect_source_tool(models)
         if tool == "relay":
             free_semantics = "quota(free_allowlist-gated)"
-        elif tool in ("ow-bridge", "external", "qoder-free"):
+        elif tool in ("ow-bridge", "external", "qoder-free", "qodercli"):
             free_semantics = "quota(third-party-managed)"
         else:
             free_semantics = "quota(unknown)"
@@ -4053,6 +4057,17 @@ def _cli_fail(message, **extra):
 #    （EXP-2026-0003「`'stdd guard'` 假阴性」的同构案例）。
 OWNER_KEY_SUFFIX = "Owner"
 RELAY_OWNER_KEY = "relayOwner"
+
+
+def _owner_marker_keys(entry):
+    """返回条目中所有「以 Owner 结尾」的归属标记键（REQ-MO-008 后缀判据）。
+
+    严禁子串判据（`'Owner' in key` 会让 `buddyBridgeOwner` 误判，见上方警告）。
+    仅当 entry 为 dict 时返回键名列表，否则返回空列表（防御性）。
+    """
+    if not isinstance(entry, dict):
+        return []
+    return [k for k in entry.keys() if k.endswith(OWNER_KEY_SUFFIX)]
 RELAY_OWNER_VALUE = "agentinn"
 # 双标记兼容（SC-014/015）：改名前的旧标记值仍视为「本工具所有」。
 # 旧值用**拼接构造**，避免本文件出现旧名字面（改名守卫 TC-ARN-001a）。
@@ -4060,83 +4075,100 @@ RELAY_OWNER_LEGACY_VALUE = "free-" + "model-relay"
 RELAY_OWNER_VALUES = frozenset({RELAY_OWNER_VALUE, RELAY_OWNER_LEGACY_VALUE})
 # 已知外部标记：**只用于把错误文案写得更可读**；判定一律按后缀，不按白名单
 # （按白名单判定会让未知标记静默放行，与「宁可拒绝」的保守默认相反）。
-KNOWN_EXTERNAL_OWNERS = {"buddyBridgeOwner": "OW Bridge", "qoderFreeOwner": "Qoder-free"}
+KNOWN_EXTERNAL_OWNERS = {"buddyBridgeOwner": "OW Bridge", "qoderCliOwner": "Qoder-cli"}
 
-# ── Qoder-free 本地网关源（v5.6.0，relay-v560-qoder-free-source）────────
-# 把本地已装的 Qoder-free 网关（OpenAI 兼容端点）自动发现为默认免费候选池。
-# 设计见 change design.md（D1–D7）。
-QODER_FREE_OWNER_KEY = "qoderFreeOwner"           # 条目所有权标记（以 Owner 结尾，复用 REQ-MO-008 后缀判定）
-QODER_FREE_OWNER_VALUE = "qoder-free"             # 标记值（源名）
-QODER_FREE_LISTEN_DEFAULT = "127.0.0.1:8210"     # 默认监听地址（config.json 可改）
-QODER_FREE_BASE_DEFAULT = "http://127.0.0.1:8210/v1"
-QODER_FREE_TTL_SECONDS = 60                        # 自动发现 TTL（next/scan 冷路径重探间隔）
-QODER_FREE_STATE_KEY = "qoder_free_last_discovery"  # STATE_FILE 中记录上次成功发现时刻
+# ══════════════════════════════════════════════════════════════
+# Qoderclicn 直扫源（v5.7.x，relay-qoderclicn-direct）
+# 直接调用官方 Qoder CLI（qoderclicn）的 `--list-models` 子命令发现模型，
+# 不再依赖已删除的 qoder-free 本地 OpenAI 网关（8210）。设计：agentinn 直接扫描 qoderclicn 桥。
+# 全程不抛异常、不刷 stdout（D6 零阻断）。
+# ══════════════════════════════════════════════════════════════
+
+# 来源归属标记（复用既有 Owner 后缀判定口径）
+QODER_CLI_OWNER_KEY = "qoderCliOwner"             # 条目所有权标记（以 Owner 结尾，复用 REQ-MO-008 后缀判定）
+QODER_CLI_OWNER_VALUE = "qoderclicn"              # 标记值（源名）
+QODER_CLI_TTL_SECONDS = 60                         # 自动发现 TTL（next/scan 冷路径重探间隔）
+QODER_CLI_STATE_KEY = "qoder_cli_last_discovery"   # STATE_FILE 中记录上次成功发现时刻
+# 官方 OpenAI 兼容网关（CN 站；--list-models 即连此网关取模型）
+QODER_CLI_GATEWAY_DEFAULT = "https://gateway.qoder.com.cn/v1"
+QODER_CLI_BIN_ENV = "QODERCLI_BIN"
+QODER_CLI_GATEWAY_ENV = "QODER_CLI_BASE"
+# 候选安装位（优先级）：环境变量 → ~/.qoder-cn → ~/.qoder → PATH
+QODER_CLI_BIN_CANDIDATES = [
+    os.path.join(HOME, ".qoder-cn", "bin", "qoderclicn", "qoderclicn.exe"),
+    os.path.join(HOME, ".qoder", "bin", "qoderclicn", "qoderclicn.exe"),
+    "qoderclicn",
+]
 # 来源归因：标记 → tool 标签（不改既有 relay/ow-bridge 判定口径）
 OWNER_TOOL_MAP = {
     RELAY_OWNER_KEY: "relay",
     "buddyBridgeOwner": "ow-bridge",
-    QODER_FREE_OWNER_KEY: "qoder-free",
+    QODER_CLI_OWNER_KEY: "qodercli",
 }
 
+# 本地 relay（方案 A，沿用 DSH connector 原则：复用源产品自身的鉴权客户端，
+# 绝不逆向 qoderclicn 的 access_token）。relay 对外暴露 OpenAI 兼容端点，内部 shell-out
+# 到官方 qoderclicn（由 qoderclicn 会话打真实网关）。qodercli 模型的 url 指向此 relay，
+# apiKey 留空（relay 忽略 Authorization，鉴权由 qoderclicn 会话负责）。
+QODER_CLI_RELAY_HOST = "127.0.0.1"
+QODER_CLI_RELAY_PORT = int(os.environ.get("QODER_CLI_RELAY_PORT", "8799"))
+QODER_CLI_RELAY_DEFAULT = f"http://{QODER_CLI_RELAY_HOST}:{QODER_CLI_RELAY_PORT}/v1"
+QODER_CLI_RELAY_PIDFILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "qodercli_relay.pid")
+QODER_CLI_RELAY_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "qodercli_relay.py")
 
-def _owner_marker_keys(entry):
-    """返回条目上所有**以 `Owner` 结尾**（大小写敏感）的键名（SC-MO-019）。
 
-    供 `models add`（拒绝判定）与 `models list`（来源三态）共用 —— 两处若各写一遍
-    判定，会漂移出「add 拒绝但 list 报 unowned」这类不一致。
-    """
-    if not isinstance(entry, dict):
-        return []
-    return [k for k in entry if isinstance(k, str) and k.endswith(OWNER_KEY_SUFFIX)]
-
-
-# ══════════════════════════════════════════════════════════════
-# Qoder-free 本地网关源（v5.6.0，relay-v560-qoder-free-source）
-# 把本地已装的 Qoder-free 网关（OpenAI 兼容端点）自动发现为默认免费候选池。
-# 设计见 change design.md（D1–D7）。全程不抛异常、不刷 stdout（D6 零阻断）。
-# ══════════════════════════════════════════════════════════════
-
-def resolve_qoder_free_config_path():
-    """Qoder-free config.json 路径：QODER_FREE_CONFIG 环境变量优先，否则按 OS 默认。
-
-    默认：Windows → D:/tools/qoder-free/config.json；其它 → ~/qoder-free/config.json。
-    （relay 内置配置文件键 qoder_free.config_path 的覆盖通道暂未实现，统一走环境变量，
-     与 v5.5.0 的 FMR_* 覆盖纪律一致；如需文件内覆盖可后续补充 —— 见 design-adjustments.md。）
-    """
-    env = os.environ.get("QODER_FREE_CONFIG")
-    if env:
+def resolve_qoder_cli_bin():
+    """定位官方 qoderclicn 可执行：QODERCLI_BIN 优先，否则按候选列表探测。"""
+    env = os.environ.get(QODER_CLI_BIN_ENV)
+    if env and os.path.exists(env):
         return env
-    if sys.platform.startswith("win"):
-        default_dir = "D:/tools/qoder-free"
-    else:
-        default_dir = os.path.join(HOME, "qoder-free")
-    return os.path.join(default_dir, "config.json")
+    import shutil as _shutil
+    for cand in QODER_CLI_BIN_CANDIDATES:
+        if os.path.isabs(cand):
+            if os.path.exists(cand):
+                return cand
+        elif _shutil.which(cand):
+            return cand
+    return None
 
 
-def resolve_qoder_free_base(cfg):
-    """从 config 的 listen 推导 OpenAI 兼容 base URL；QODER_FREE_BASE 可整体覆盖。"""
-    env = os.environ.get("QODER_FREE_BASE")
+def resolve_qoder_cli_base():
+    """qoderclicn 官方 OpenAI 兼容网关 base URL；QODER_CLI_BASE 可覆盖。"""
+    env = os.environ.get(QODER_CLI_GATEWAY_ENV)
     if env:
         return env.rstrip("/")
-    listen = (cfg or {}).get("listen") or QODER_FREE_LISTEN_DEFAULT
-    return f"http://{listen}/v1"
+    return QODER_CLI_GATEWAY_DEFAULT
 
 
-def _probe_qoder_free_models(base_url, api_key):
-    """探测 GET {base}/v1/models（带 Bearer）。成功返回解析后的 JSON dict；任何失败抛异常（由调用方吞掉）。"""
-    import urllib.request
-    import urllib.error
-    url = base_url.rstrip("/") + "/models"
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
-    with urllib.request.urlopen(req, timeout=3) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+def list_qoder_cli_models(bin_path):
+    """调用 `qoderclicn --list-models` 解析可用模型名（当前账号）。
+
+    返回模型名 list；任何失败（无法启动 / 非零退出 / 无输出）抛异常（由调用方吞掉）。
+    输出首行为表头 MODEL，其后每行一个模型名；空行跳过。
+    """
+    import subprocess as _sp
+    creation = getattr(_sp, "CREATE_NO_WINDOW", 0)
+    proc = _sp.run([bin_path, "--list-models"],
+                   capture_output=True, text=True, timeout=45,
+                   creationflags=creation)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"qoderclicn exit={proc.returncode}: {proc.stderr.strip()[:200]}")
+    names = []
+    for line in proc.stdout.splitlines():
+        s = line.strip()
+        if not s or s.upper() == "MODEL":
+            continue
+        names.append(s)
+    return names
 
 
-def _safe_persist_qoder_free(before, new_data):
-    """原子写 models.json 并校验：所有非 qoder-free 条目逐字不变（含 apiKey）。
+def _safe_persist_qoder_cli(before, new_data):
+    """原子写 models.json 并校验：所有非 qoderclicn 条目逐字不变（含 apiKey）。
 
-    返回 (backup, err)：err 为 None 表示成功。不调用 _cli_fail（不退出、不刷 stderr），
-    便于 discover 在任意失败分支静默跳过（D6）。
+    返回 (backup, err)；err=None 表示成功。不退出、不刷 stderr（D6）。
     """
     target = MODELS_JSON
     backup = None
@@ -4161,9 +4193,9 @@ def _safe_persist_qoder_free(before, new_data):
                 pass
         return backup, "after-write parse failed"
     before_others = [e for e in before
-                     if not (isinstance(e, dict) and e.get(QODER_FREE_OWNER_KEY))]
+                     if not (isinstance(e, dict) and e.get(QODER_CLI_OWNER_KEY))]
     after_others = [e for e in after
-                    if not (isinstance(e, dict) and e.get(QODER_FREE_OWNER_KEY))]
+                    if not (isinstance(e, dict) and e.get(QODER_CLI_OWNER_KEY))]
     if (json.dumps(before_others, sort_keys=True, ensure_ascii=False) !=
             json.dumps(after_others, sort_keys=True, ensure_ascii=False)):
         if backup:
@@ -4175,49 +4207,40 @@ def _safe_persist_qoder_free(before, new_data):
     return backup, None
 
 
-def _touch_qoder_free_discovery():
+def _touch_qoder_cli_discovery():
     """在 STATE_FILE 记录本次成功发现时刻（TTL 依据）。"""
     try:
         state = load_state()
-        state[QODER_FREE_STATE_KEY] = now_utc().isoformat()
+        state[QODER_CLI_STATE_KEY] = now_utc().isoformat()
         save_state(state)
     except Exception:
         pass
 
 
 def discover_qoder_free(force=False, _probe=None):
-    """探测 Qoder-free /v1/models，将其模型以 Custom 条目（带 qoderFreeOwner）幂等写入 models.json。
+    """调用官方 qoderclicn --list-models 发现模型，以 Custom 条目（带 qoderCliOwner）
+    幂等写入 models.json。全程不抛异常、不刷 stdout（D6 零阻断）。
 
-    全程**不抛异常、不刷 stdout**；任何失败（config 缺失 / 不可达 / 空 / 写入校验失败）
-    一律返回 ok=False 的 dict（D6 零阻断）。成功时返回 ok=True 的摘要（apiKey 经 _mask_secret）。
+    与已删除的 qoder-free 8210 网关不同：此处不依赖任何常驻进程 / OpenAI 端点，
+    直接读官方 CLI 的模型清单。模型条目 url 指向本地 relay（方案 A：复用 qoderclicn
+    自身会话打真实网关，绝不逆向 access_token），apiKey 留空（relay 忽略 Authorization）。
+    真实官方网关记录在 qodercli_gateway 字段备查。使用层见 SKILL.md「Qoderclicn 直扫」。
 
-    幂等：同 id 已存在且带 qoderFreeOwner → 更新；同 id 带其它 owner → 跳过不覆盖。
-    force=True 时无视 TTL（供 `relay qoder-free sync` 显式强刷）。
-    _probe 可注入（单测不触网）；测试亦可用 QODER_FREE_CONFIG 指向临时 config。
+    幂等：同 id 已带 qoderCliOwner → 更新；同 id 带其它 owner → 跳过不覆盖。
+    force=True 时无视 TTL（供 `relay qoder-free sync` 显式强刷；子命令名沿用历史）。
+    _probe 可注入（单测不触真 CLI）：传入 callable(bin_path)->list[str]。
     """
-    cfg_path = resolve_qoder_free_config_path()
-    if not os.path.exists(cfg_path):
-        return {"ok": False, "reason": "config_missing", "discovered": 0}
+    bin_path = resolve_qoder_cli_bin()
+    if not bin_path:
+        return {"ok": False, "reason": "cli_missing", "discovered": 0}
+    base = resolve_qoder_cli_base()
+    lister = _probe or list_qoder_cli_models
     try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-    except (ValueError, OSError):
-        return {"ok": False, "reason": "config_unreadable", "discovered": 0}
-    if not isinstance(cfg, dict):
-        return {"ok": False, "reason": "config_unreadable", "discovered": 0}
-    api_key = cfg.get("api_key") or cfg.get("apiKey")
-    if not api_key:
-        return {"ok": False, "reason": "no_api_key", "discovered": 0}
-    base = resolve_qoder_free_base(cfg)
-    probe = _probe or _probe_qoder_free_models
-    try:
-        payload = probe(base, api_key)
+        models = lister(bin_path)
     except Exception:
-        return {"ok": False, "reason": "probe_failed", "discovered": 0}
-    models = [m.get("id") for m in (payload.get("data") or [])
-              if isinstance(m, dict) and m.get("id")]
+        return {"ok": False, "reason": "list_failed", "discovered": 0}
     if not models:
-        _touch_qoder_free_discovery()
+        _touch_qoder_cli_discovery()
         _record_qoder_free_limit(load_usage(), [])
         return {"ok": True, "discovered": 0, "reason": "empty", "models": []}
 
@@ -4232,29 +4255,34 @@ def discover_qoder_free(force=False, _probe=None):
         new_entry = {
             "id": mid,
             "vendor": "Custom",
-            "url": base,
-            "apiKey": api_key,
-            QODER_FREE_OWNER_KEY: QODER_FREE_OWNER_VALUE,
+            "url": QODER_CLI_RELAY_DEFAULT,     # 指向本地 relay（方案 A），由 relay 复用 qoderclicn 会话
+            "apiKey": "",                       # relay 忽略 Authorization，鉴权由 qoderclicn 会话负责
+            "bridged": True,
+            "bridge_tool": "qodercli",
+            "qoderclicn_session_auth": True,    # 标记：走 qoderclicn 会话而非静态 key
+            "qodercli_relay": True,             # 标记：经本地 relay 暴露 OpenAI 兼容端点
+            "qodercli_gateway": base,           # 真实官方网关（relay 内部经 qoderclicn 会话打它）
+            QODER_CLI_OWNER_KEY: QODER_CLI_OWNER_VALUE,
         }
         existing = next((e for e in out
                          if isinstance(e, dict) and e.get("id") == mid), None)
         if existing is not None:
             other_owners = [k for k in _owner_marker_keys(existing)
-                            if k != QODER_FREE_OWNER_KEY]
+                            if k != QODER_CLI_OWNER_KEY]
             if other_owners:
                 skipped += 1
                 continue  # 不覆盖他人（relay/ow-bridge）条目（SC-MO-020 同构）
             existing.update(new_entry)
-            existing[QODER_FREE_OWNER_KEY] = QODER_FREE_OWNER_VALUE
+            existing[QODER_CLI_OWNER_KEY] = QODER_CLI_OWNER_VALUE
             updated += 1
         else:
             out.append(new_entry)
             discovered += 1
 
-    backup, perr = _safe_persist_qoder_free(before, out)
+    backup, perr = _safe_persist_qoder_cli(before, out)
     if perr:
         return {"ok": False, "reason": "persist_failed", "detail": perr, "discovered": 0}
-    _touch_qoder_free_discovery()
+    _touch_qoder_cli_discovery()
     _record_qoder_free_limit(load_usage(), models)
     return {
         "ok": True,
@@ -4262,18 +4290,18 @@ def discover_qoder_free(force=False, _probe=None):
         "updated": updated,
         "skipped": skipped,
         "models": models,
-        "apiKey_masked": _mask_secret(api_key),
+        "base": base,
         "written_to": MODELS_JSON,
         "backup": os.path.basename(backup) if backup else None,
     }
 
 
 def maybe_discover_qoder_free(force=False, _probe=None):
-    """冷路径自动触发：TTL 内（默认 60s）不重复联网；任何异常全吞（best-effort，D6）。
+    """冷路径自动触发：TTL 内（默认 60s）不重复调用 CLI；任何异常全吞（best-effort，D6）。
 
     安全闸 FMR_QF_AUTODISCOVER：设为 0/false/off/no 时彻底禁用（保护既有测试套件 /
     避免对真实 models.json 的意外改写）；默认启用（用户诉求「自动发现」）。
-    _probe 可注入（单测不触网）；生产默认走 _probe_qoder_free_models。
+    _probe 可注入（单测不触真 CLI）；生产默认走 list_qoder_cli_models。
     """
     kill = os.environ.get("FMR_QF_AUTODISCOVER", "1").strip().lower()
     if kill in ("0", "false", "off", "no"):
@@ -4281,11 +4309,11 @@ def maybe_discover_qoder_free(force=False, _probe=None):
     try:
         if not force:
             state = load_state()
-            last = state.get(QODER_FREE_STATE_KEY)
+            last = state.get(QODER_CLI_STATE_KEY)
             if last:
                 try:
                     last_dt = datetime.fromisoformat(last)
-                    if (now_utc() - last_dt).total_seconds() < QODER_FREE_TTL_SECONDS:
+                    if (now_utc() - last_dt).total_seconds() < QODER_CLI_TTL_SECONDS:
                         return {"ok": False, "reason": "ttl_fresh", "discovered": 0}
                 except Exception:
                     pass
@@ -4295,48 +4323,179 @@ def maybe_discover_qoder_free(force=False, _probe=None):
 
 
 def cmd_qoder_free(args):
-    """Qoder-free 源管理：sync（强制刷新发现）/ status（可达性与已发现模型）。"""
+    """Qoder-cli 直扫源管理：sync（强制刷新发现）/ status（CLI 可达性与已发现模型）。
+
+    子命令名沿用历史 `qoder-free`（调用方不变），实际已改为直接扫官方 qoderclicn。
+    """
     action = getattr(args, "qf_action", None)
+    bin_path = resolve_qoder_cli_bin()
     if action == "sync":
         result = discover_qoder_free(force=True)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         sys.exit(0 if result.get("ok") else 1)
     if action == "status":
-        cfg_path = resolve_qoder_free_config_path()
         info = {
-            "config_path": cfg_path,
-            "config_exists": os.path.exists(cfg_path),
-            "base": resolve_qoder_free_base({}),
+            "cli_bin": bin_path,
+            "cli_found": bin_path is not None,
+            "base": resolve_qoder_cli_base(),
         }
         state = load_state()
-        info["last_discovery"] = state.get(QODER_FREE_STATE_KEY)
-        if os.path.exists(cfg_path):
+        info["last_discovery"] = state.get(QODER_CLI_STATE_KEY)
+        if bin_path:
             try:
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-                api_key = cfg.get("api_key") or cfg.get("apiKey")
-                if api_key:
-                    base = resolve_qoder_free_base(cfg)
-                    try:
-                        payload = _probe_qoder_free_models(base, api_key)
-                        ms = [m.get("id") for m in (payload.get("data") or [])
-                              if isinstance(m, dict) and m.get("id")]
-                        info["reachable"] = True
-                        info["model_count"] = len(ms)
-                        info["models"] = ms
-                    except Exception as e:
-                        info["reachable"] = False
-                        info["error"] = type(e).__name__
-                else:
-                    info["reachable"] = None
-                    info["error"] = "no_api_key"
+                ms = list_qoder_cli_models(bin_path)
+                info["reachable"] = True
+                info["model_count"] = len(ms)
+                info["models"] = ms
             except Exception as e:
+                info["reachable"] = False
                 info["error"] = type(e).__name__
+        else:
+            info["reachable"] = None
+            info["error"] = "cli_missing"
+        info["relay"] = _relay_status()
         print(json.dumps(info, ensure_ascii=False, indent=2))
         sys.exit(0)
-    print(json.dumps({"error": "unknown action; use sync or status"}, ensure_ascii=False))
+    if action == "relay-start":
+        print(json.dumps(_relay_start(), ensure_ascii=False, indent=2))
+        sys.exit(0)
+    if action == "relay-stop":
+        print(json.dumps(_relay_stop(), ensure_ascii=False, indent=2))
+        sys.exit(0)
+    if action == "relay-status":
+        print(json.dumps(_relay_status(), ensure_ascii=False, indent=2))
+        sys.exit(0)
+    print(json.dumps({"error": "unknown action; use sync/status/relay-start/relay-stop/relay-status"}, ensure_ascii=False))
     sys.exit(1)
 
+
+# ── 本地 relay 进程管理（方案 A：复用 qoderclicn 自身会话）──────────────
+def _relay_is_running(port):
+    """端口可连即视为 relay 在跑（轻量探活，不读 pidfile）。"""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.3)
+    try:
+        return s.connect_ex((QODER_CLI_RELAY_HOST, int(port))) == 0
+    finally:
+        s.close()
+
+
+def _relay_read_pid():
+    try:
+        with open(QODER_CLI_RELAY_PIDFILE, "r", encoding="utf-8") as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
+def _relay_write_pid(pid):
+    try:
+        with open(QODER_CLI_RELAY_PIDFILE, "w", encoding="utf-8") as f:
+            f.write(str(pid))
+    except Exception:
+        pass
+
+
+def _relay_clear_pid():
+    try:
+        os.remove(QODER_CLI_RELAY_PIDFILE)
+    except OSError:
+        pass
+
+
+def _pids_on_port(port):
+    """Windows: 返回占用 TCP 端口的 pid 列表（netstat 解析）；其它平台返回 []。
+    以 bytes 读取 netstat 输出，避免 text=True 在 PYTHONUTF8 环境下把本地化字节当 utf-8 崩 reader 线程。"""
+    import subprocess as _sp
+    try:
+        raw = _sp.run(["netstat", "-ano", "-p", "TCP"],
+                      capture_output=True, creationflags=0x08000000, timeout=10).stdout or b""
+        out = raw.decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    pids = []
+    target = ":%d" % int(port)
+    for line in out.splitlines():
+        cols = line.split()
+        # 列: Proto  Local  Foreign  State  PID
+        if len(cols) >= 5 and cols[0].upper() == "TCP" and cols[1].endswith(target):
+            try:
+                pids.append(int(cols[-1]))
+            except ValueError:
+                pass
+    return pids
+
+
+def _kill_pid_tree(pid):
+    """Windows: 强制杀进程及其子进程树。"""
+    import subprocess as _sp
+    try:
+        _sp.run(["taskkill", "/PID", str(pid), "/F", "/T"],
+                creationflags=0x08000000, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, timeout=15)
+        return True
+    except Exception:
+        return False
+
+
+def _relay_start(port=None):
+    """启动/重启 qodercli_relay.py 为后台常驻进程（DETACHED）。
+    若端口已被占用（可能是旧代码实例），先停止再启动，保证「改完 relay 代码再 start」拿到新代码。"""
+    import subprocess as _sp
+    import time as _time
+    port = int(port if port is not None else QODER_CLI_RELAY_PORT)
+    if _relay_is_running(port):  # 重启语义：先停旧的
+        _relay_stop()
+    bin_path = resolve_qoder_cli_bin()
+    if not bin_path:
+        return {"ok": False, "reason": "cli_missing"}
+    creation = 0x08000000 | 0x00000200 | 0x00000008  # NO_WINDOW|NEW_PROCESS_GROUP|DETACHED
+    try:
+        p = _sp.Popen([sys.executable, QODER_CLI_RELAY_SCRIPT, "--host", QODER_CLI_RELAY_HOST,
+                       "--port", str(port)],
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, creationflags=creation)
+    except Exception as e:
+        return {"ok": False, "reason": "spawn_failed", "detail": str(e)}
+    for _ in range(50):  # 轮询端口，最多 ~10s
+        if _relay_is_running(port):
+            _relay_write_pid(p.pid)
+            return {"ok": True, "running": True, "port": port, "pid": p.pid}
+        _time.sleep(0.2)
+    return {"ok": False, "reason": "did_not_come_up", "pid": p.pid}
+
+
+def _relay_stop():
+    """停止后台 relay：先按 pidfile，再按端口兜底（谁占端口杀谁）；轮询端口确认真正退出。"""
+    import time as _time
+    port = QODER_CLI_RELAY_PORT
+    pid = _relay_read_pid()
+    candidate_pids = set()
+    if pid:
+        candidate_pids.add(pid)
+    for p in _pids_on_port(port):  # 端口实查兜底（防 pidfile 过期）
+        if p > 0:
+            candidate_pids.add(p)
+    for p in candidate_pids:
+        _kill_pid_tree(p)
+    for _ in range(25):  # 轮询端口最多 ~5s，确认真正退出
+        if not _relay_is_running(port):
+            _relay_clear_pid()
+            return {"ok": True, "stopped_pids": sorted(candidate_pids)}
+        _time.sleep(0.2)
+    return {"ok": False, "reason": "still_running", "pids": sorted(candidate_pids)}
+
+
+def _relay_status():
+    port = QODER_CLI_RELAY_PORT
+    running = _relay_is_running(port)
+    pid = _relay_read_pid()
+    if running and (not pid or pid not in _pids_on_port(port)):
+        # pidfile 过期：以端口实查为准
+        ports = _pids_on_port(port)
+        pid = ports[0] if ports else None
+    return {"ok": True, "port": port, "running": running,
+            "pid": (pid if running else None),
+            "script": QODER_CLI_RELAY_SCRIPT}
 
 def _load_models_json_raw(target=None):
     """读 models.json 的**原始 list**（不做 vendor 过滤）。
@@ -4941,7 +5100,7 @@ AGENTHUB_ONBOARDED_KEY = "agenthub_onboarded"
 # v5.6.1：AgentHub 偏好消费端 —— 「最近一次已发起提示」的本地自然日（防打扰，每自然日一次）
 AGENTHUB_PROMPTED_KEY = "agenthub_prompted_on"
 # 桥接来源工具标签（自定义渠道中的「非纯 BYOK」）—— 与 origins 分类口径一致
-BRIDGED_TOOLS = ("qoder-free", "ow-bridge", "external")
+BRIDGED_TOOLS = ("qoder-free", "qodercli", "ow-bridge", "external")
 
 
 def _model_origin_tool(entry):
@@ -5134,7 +5293,7 @@ def _scan_bridged_free_window(model, _probe=None):
     零阻断（SC-002 / R-BRIDGE）：任何异常都吞掉并返回 None ⇒ 调用方回落 all-day，
     绝不阻断向导、绝不抛异常。
       - `_probe(model) -> dict|None` 可注入（单测不触网）；
-      - 默认路径：qoder-free 端点可达性探测（可达 ⇒ 由额度管理，语义 all-day）。
+      - 默认路径：qoderclicn CLI 可达性探测（qodercli 来源；可达 ⇒ 由额度管理，语义 all-day）。
     """
     if not isinstance(model, dict) or not model.get("bridged"):
         return None
@@ -5145,16 +5304,11 @@ def _scan_bridged_free_window(model, _probe=None):
                     and res.get("end_hour") is not None):
                 return {"start_hour": res["start_hour"], "end_hour": res["end_hour"]}
             return None
-        if model.get("bridge_tool") == "qoder-free":
-            cfg_path = resolve_qoder_free_config_path()
-            if not os.path.exists(cfg_path):
+        if model.get("bridge_tool") in ("qodercli", "qoder-free"):
+            bin_path = resolve_qoder_cli_bin()
+            if not bin_path:
                 return None
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            api_key = cfg.get("api_key") or cfg.get("apiKey")
-            if not api_key:
-                return None
-            _probe_qoder_free_models(resolve_qoder_free_base(cfg), api_key)
+            list_qoder_cli_models(bin_path)   # 不可达/失败 → 抛异常 → 外层 except 回落 None
             return {"start_hour": 0, "end_hour": 0}
         return None
     except Exception:
@@ -5579,9 +5733,10 @@ def main():
     p_cl = sub.add_parser("clear-exhausted", help="清除限流标记")
     p_cl.add_argument("--model", required=True, help="模型 ID")
 
-    p_qf = sub.add_parser("qoder-free", help="Qoder-free 本地网关源（自动发现 + 默认免费池）")
-    p_qf.add_argument("qf_action", choices=["sync", "status"],
-                      help="sync=强制刷新发现并写入 models.json；status=查看可达性与已发现模型")
+    p_qf = sub.add_parser("qoder-free", help="Qoderclicn 直扫源（自动发现 + 本地 relay）")
+    p_qf.add_argument("qf_action", choices=["sync", "status", "relay-start", "relay-stop", "relay-status"],
+                      help="sync=强刷发现并写 models.json；status=CLI 可达性+relay 状态；"
+                           "relay-start/stop/status=本地 relay 进程管理（方案 A）")
 
     args = parser.parse_args()
 

@@ -47,7 +47,8 @@ WorkBuddy 的 Agent 工具 `model` 参数接受模型 ID。`models.json` 中的�
 | `next` / `record` | 调度选模型 / 记录用量与额度告警 |
 | `origins` | 列出模型来源（relay / 桥接 / 平台） |
 | `relay-window` | 时段确认窗口回传处理 |
-| `qoder-free sync` / `qoder-free status` | 刷新 / 探活 **qoderclicn 桥**（OpenAI 兼容端点 `http://127.0.0.1:8210/v1`，实现为 `D:/tools/qoder-free`：每账号 Node worker + 内存 hook 运行中的 qoderclicn）。子命令名沿用历史；网关未启动时 `reachable:false` 属预期 |
+| `qoder-free sync` / `qoder-free status` | 刷新 / 探活 **qoderclicn 直扫**（v5.7.x 起）：agentinn 直接调用官方 `qoderclicn --list-models` 发现模型（owner=`qoderCliOwner`，url 翻转为本地 relay `http://127.0.0.1:8799/v1`，`qodercli_gateway` 保留真实网关 `https://gateway.qoder.com.cn/v1` 备查，apiKey 留空）。**不再依赖已删除的本地网关 `http://127.0.0.1:8210/v1`**。子命令名沿用历史；`status` 显示 `cli_bin` / `cli_found` / `reachable` / `models` / `relay` |
+| `qoder-free relay-start` / `relay-stop` / `relay-status` | 管理 **本地 qoderclicn relay**（方案 A 落地）：relay 复用 qoderclicn 自己的浏览器会话（不逆向 token），把 OpenAI 形状请求 shell-out 到 `qoderclicn -p -m <model>` 补全。使用前必须先 `relay-start`，否则 15 条 qodercli 模型指向的 8799 端口无服务。详见 `SKILL.md`「Qoderclicn 本地 relay」 |
 
 ## 触发词
 

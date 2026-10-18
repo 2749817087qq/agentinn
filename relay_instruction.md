@@ -41,10 +41,14 @@ agentinn onboard
 
 - `system_models` 时段由**宿主程序规范**定义 ⇒ **只读**（`read_only:true`），**不可编辑**。
 - `custom_models`（BYOK + 桥接）⇒ **逐模型可选时段**；桥接项（`bridged:true`，如 OW Bridge /
-  qoderclicn 桥）已尝试扫描其免费时段并预填，扫不到则 all-day（`{start_hour:0,end_hour:0}`）。
-  Qoder 侧的桥接对象是**从运行中的 `qoderclicn` 搭的桥**，对外是 OpenAI 兼容端点
-  `http://127.0.0.1:8210/v1`（`/v1/chat/completions` + `/v1/models`）；网关未启动时
-  `qoder-free status` 报 `reachable:false` 属预期。
+  qoderclicn 直扫）已尝试扫描其免费时段并预填，扫不到则 all-day（`{start_hour:0,end_hour:0}`）。
+  Qoder 侧由 agentinn **直接调用官方 `qoderclicn --list-models`** 发现模型（owner=`qoderCliOwner`，
+  url **翻转为本地 relay** `http://127.0.0.1:8799/v1`，`qodercli_gateway` 保留真实官方网关
+  `https://gateway.qoder.com.cn/v1` 备查，apiKey 留空、由 relay 复用的浏览器会话鉴权），
+  **不再依赖已删除的本地网关 `http://127.0.0.1:8210/v1`**。`qoder-free status` 现显示
+  `cli_bin` / `cli_found` / `reachable` / `models` / `relay`（子命令名沿用历史，内部走 CLI 直扫 +
+  本地 relay）；**使用前必须先 `qoder-free relay-start` 把 8799 端口的 relay 起起来**，否则这 15 条
+  模型指向的端点无服务。详见 `SKILL.md`「Qoderclicn 本地 relay」。
 
 用户调整 + 确认后落盘：
 

@@ -27,7 +27,7 @@ description: |
           流量统计、模型配额、自动切换、免费量到了、hy3、hy4、平台模型、免费时段、
           确认免费模型、免费模型白名单、额度用完、额度告警、
           时段滚轮、免费时段确认、改免费时段、window set、relay-window
-version: "5.7.1"
+version: "5.7.5"
 author: agent_created
 license: unknown
 
@@ -60,11 +60,62 @@ WorkBuddy 的 Agent 工具 `model` 参数接受模型 ID。`models.json` 中的�
 
 **v5.6 新增**：
 - **统一启用向导（Step 0 单次渲染）** —— 时段 / 模型 / 归属 / AgentHub 合并到一个控件（4 段）；新增 `onboard`（读）/ `onboard set`（写）/ `onboard-status`（due 判定 = 未确认 / 跨自然日 / 数据漂移），`next` / `inventory` 透传 `onboard_due`。**系统模型时段用宿主规范（只读）；自定义 / 桥接模型逐模型可选时段**。见下文「统一启用向导」。
-- **Qoder 上游 = qoderclicn 桥（OpenAI 兼容端点）** —— 上游是**从运行中的 `qoderclicn` 搭的桥**：不是官方 API，也不是「第三方 Qoder-free 产品」。
-  - **形态**：本机 OpenAI 兼容网关 `http://127.0.0.1:8210/v1`（`POST /v1/chat/completions` 流式/非流式、`GET /v1/models`）；实现 = `D:/tools/qoder-free`（Go 单二进制，源自 cli2api 的 per-account Node worker + qodercli hook 方案），面板 `http://127.0.0.1:8210/panel/`。
-  - **桥接方式**：每账号一个 Node worker（端口自 `worker_base_port`=33100 起，每 worker 独立 HOME，配置目录 `<worker home>/.qoder-cn`），加载 `worker/node_modules/@qodercn-ai/qoderclicn/bundle/qoderclicn.js`（**钉版 1.1.32**，由 `npm ci --prefix worker` 装入）并**在内存里打 hook** —— 即驱动运行中的 qoderclicn，而非调官方 HTTP API。
-  - ⚠️ `qoder_cn_cli_js` 留空时走 `autoCLIJS`，**只找 worker/node_modules**，不会用系统另装的 `%USERPROFILE%\.qoder-cn\bin\qoderclicn\qoderclicn.exe`（那份 1.1.73 是独立 CLI，与本链路无关）。
-  - 模型 ID 加 `cn:` / `global:` 前缀可强制区域。网关未启动时 `qoder-free status` 返回 `reachable:false` 属预期 —— 该子命令名沿用历史，实际是**这座桥的探活入口**（发现逻辑已直指上述 OpenAI 兼容端点，无需改代码）。
+- **Qoder 上游 = qoderclicn 直扫（v5.7.x 起，relay-qoderclicn-direct）** —— agentinn **直接调用官方 `qoderclicn` CLI** 发现模型，**不再依赖已删除的 qoder-free 本地 OpenAI 网关（8210）**。
+  - **形态**：`pick_model.py` 调 `qoderclicn --list-models`（官方 CLI 自带子命令，列出当前账号可用模型），解析出模型名后以 `Custom` 条目（owner=`qoderCliOwner`、值=`qoderclicn`）幂等写入 `models.json`；url **指向本地 relay** `http://127.0.0.1:8799/v1`（relay 默认端口），`qodercli_gateway` 字段保留真实官方网关 `https://gateway.qoder.com.cn/v1` 备查；apiKey 留空（鉴权由 relay 复用的 qoderclicn 会话负责，见下）。
+  - **鉴权说明（方案 A，已落地）**：qoderclicn 用浏览器会话鉴权（`.auth/user` 是**加密 blob**，**无静态 apiKey**，且 blob 不能直接当 bearer token 用——已实测网关返回 503）。agentinn 采用**方案 A**：**不逆向 token**，而是起一个本地 relay（`qodercli_relay.py`）复用 qoderclicn 自己的鉴权客户端——relay 收到 OpenAI 形状请求后直接 `qoderclicn -p -m <model>` 一次性补全，由 qoderclicn 自身持有效会话去打网关。详见下节「Qoderclicn 本地 relay」。
+  - **安装位**：`qoderclicn.exe` 候选顺序 = `QODERCLI_BIN` 环境变量 → `~/.qoder-cn/bin/qoderclicn/qoderclicn.exe` → `~/.qoder/bin/qoderclicn/qoderclicn.exe` → PATH。
+  - 子命令名 `qoder-free`（调用方不变）沿用历史，实际已改为直接扫官方 qoderclicn；`agentinn qoder-free status` 显示 CLI 可达性与已发现模型，`agentinn qoder-free sync` 强制刷新发现并写 `models.json`（url 翻转为 relay），`agentinn qoder-free relay-start/relay-stop/relay-status` 管理本地 relay 进程。
+
+## Qoderclicn 本地 relay（方案 A 落地）
+
+15 条 `qoderCliOwner` 条目的 `url` 已指向 `http://127.0.0.1:8799/v1`，**但 relay 进程未起时这些模型无法被调用**（宿主 WorkBuddy 打到 8799 会连接失败）。故使用前必须先把 relay 起起来。
+
+### 它是什么 / 数据流
+
+`scripts/qodercli_relay.py` 是一个**本地 OpenAI 兼容 relay**：
+
+```
+WorkBuddy (调 http://127.0.0.1:8799/v1/chat/completions)
+   │  OpenAI 形状 {model, messages, max_tokens}
+   ▼
+qodercli_relay.py (本地 ThreadingHTTPServer)
+   │  抽 system + 最后一条 user → qoderclicn -p -m <model> --system-prompt <sys> <query>
+   ▼
+qoderclicn.exe (官方 CLI，自己持有有效浏览器会话去打 https://gateway.qoder.com.cn)
+   │  返回补全文本
+   ▼
+relay 整理成 OpenAI chat.completion 形状回给 WorkBuddy（含 relay_meta.backend=qoderclicn）
+```
+
+核心原则（沿用 DSH connector 思路）：**复用源产品自己的鉴权客户端**，绝不逆向 qoderclicn 的 `access_token`。relay 不碰 `.auth/user` 加密 blob。
+
+### 进程管理（三个子命令）
+
+```bash
+agentinn qoder-free relay-start   # 起本地 relay（DETACHED 后台，独立于本会话；若端口已占用先停旧的再起）
+agentinn qoder-free relay-status  # 探活：{running, port:8799, pid}
+agentinn qoder-free relay-stop    # 按 pidfile + 端口兜底强杀（taskkill /F /T），轮询确认退出
+```
+
+- `relay-start` 带**重启语义**：端口已被占用（可能是旧代码实例）时先 `relay-stop` 再起，保证「改完 relay 代码再 start」拿到新代码。
+- `relay-stop` 不只信 pidfile，还会 `netstat` 查端口实占的 pid 一并强杀，防 pidfile 过期漏杀。
+- 启动后宿主即可把 15 条 qodercli 模型当普通 OpenAI 端点用（`apiKey` 随便填，relay 忽略 `Authorization`）。
+- `/v1/models` 走 GET 返回空列表，并注明模型清单由 `models.json` 提供（relay 不负责列模型）。
+
+### 稳健性细节（已实测修掉）
+
+- **编码**：qoderclicn 在 Windows 控制台以 GBK（cp936）输出中文。relay 以 **bytes** 读 CLI 输出，先试 `utf-8` 再试 `gb18030`（GBK 超集），即便宿主在 `PYTHONUTF8=1` 下运行也能正确还原中文；请求体同理（utf-8 → gb18030 → locale 兜底），GBK 客户端也不会被 500。
+- **Windows 杀进程**：用 `taskkill /PID <pid> /F /T`（树）而非 `os.kill(SIGTERM)`，后者对 DETACHED 进程不可靠。
+
+### MVP 限制（非阻断，待定是否补齐）
+
+1. **多轮只取最后一条 user**：`qoderclicn -p` 是一次性补全，更早的 user/assistant 轮次不进上下文（system 作 `--system-prompt`）。
+2. **不支持 tools / function calling**：CLI 不暴露，故这些模型无法用于需要工具调用的 Agent 任务（`doctor --check-tools` 对它们不适用）。
+3. **流式**：缓冲完成后发单个 SSE chunk + `[DONE]`（够骗过基础 SSE 客户端），非真流式。
+
+### 已知缺口（待用户拍板）
+
+- **未做开机自启 / 崩溃拉起**：relay 是手动 `relay-start` 的常驻进程，机器重启或进程意外退出后需手动重启。若要"随 WorkBuddy 启动自动拉起"，需额外的启动钩子（如 Windows 任务计划程序 / WorkBuddy 启动脚本接入），当前未实现。
 
 ## 统一启用向导（Step 0，v5.6.0 —— 单次渲染）
 

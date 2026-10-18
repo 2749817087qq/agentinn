@@ -8,3 +8,7 @@ __pycache__/
 # 本机专属设置（含绝对路径，不入库）
 .claude/settings.local.json
 .codebuddy/settings.local.json
+
+# relay 运行时 pid 文件（relay-start 写入，不入库）
+qodercli_relay.pid
+*.pid
