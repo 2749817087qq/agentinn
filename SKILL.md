@@ -27,7 +27,7 @@ description: |
           流量统计、模型配额、自动切换、免费量到了、hy3、hy4、平台模型、免费时段、
           确认免费模型、免费模型白名单、额度用完、额度告警、
           时段滚轮、免费时段确认、改免费时段、window set、relay-window
-version: "5.7.5"
+version: "5.7.6"
 author: agent_created
 license: unknown
 
@@ -670,6 +670,84 @@ agentinn window set --start-hour 22 --end-hour 7
 > 为什么配置元素"藏在数组里"：`load_models()` 依赖顶层是数组，
 > 改成 `{"models": [...], "freeWindow": {...}}` 会破坏所有现有 models.json。
 > 配置元素没有 `vendor` 字段，会被自动过滤掉，不影响模型列表。
+
+### 来源 3: 账号级免费（`known_free`，v5.7.6）
+
+**要解决的问题**：有些模型在**账号/服务端**层面免费，但**不在任何落盘配置里** ——
+`cache/acc-product-config-v3.json` 的 `modelPromotions` 为空、`models[].credits` 还写着
+`x0.11 credits`，`models.json` 也没有它。程序侧扫描器因此扫不到，agentinn 就永远选不到它，
+尽管实际调用一直扣 0 积分。
+
+**判定依据**：transcript 里的真实计费记录（`~/.workbuddy-ai/projects/**/*.jsonl`）。
+事件行的 `providerData.requestModelName` 是**实际使用的模型**，事件内的 `credit` 字段
+（可能在 `providerData` 深层，需递归找）是**该次请求真实扣除的积分**。
+
+| 观察到的事实 | 学习结论 |
+|--------------|----------|
+| 该模型所有记录 `credit: 0` | 记入 `known_free`（账号级免费） |
+| 任一记录 `credit > 0` | **不学**；若已学过则**撤销**（促销到期/口径变更） |
+| `credit` 字段缺失 / 不可解析 | 不学，产出 warning（不猜） |
+
+保守判定是 `has_zero and not has_paid` —— 同一事件里混有 0 和付费值时按付费处理。
+
+**为什么要撤销而不是只加不减**：`known_free` 条目会被当作免费模型直接参与调度（不再走免费时段
+判定）。若某模型促销到期后仍在 `known_free` 里，agentinn 会持续把**收费款当免费款**选中 ——
+正是本项目最不能接受的静默烧积分场景。故一旦观测到付费记录即撤销（宁可少用，不可错用），
+并在 `learn` 的 warnings 里明示撤销了哪个模型。
+
+**显示名 ↔ id 归一**：transcript 里是**大写显示名**（`Deepseek-V4.1-Flash` / `Hy3` /
+`Step-5-Preview`），配置 id 是**小写**（`deepseek-v4.1-flash` / `hy3` / `step-5-preview`）。
+映射表 `DISPLAY_NAME_MAPPING` 负责归一，未命中按原值回退。查看：
+
+```bash
+agentinn mapping list          # 列出 显示名 -> model_id
+```
+
+**命令**：
+
+```bash
+agentinn known-free            # = known-free list：列出已学到的账号级免费模型
+agentinn known-free learn      # 立即扫描 transcript 学习（增量，按 mtime）
+agentinn known-free clear      # 一键清空（误学兜底）；同时重置增量位以便重学
+```
+
+> 三条子命令的**结果都走 stdout**。早期实现只 `return` 字符串而调用方丢弃返回值，
+> 导致整族命令静默无输出（EXP-2026-0015 类测试幻觉：单测断言返回值所以全绿）。
+
+state 里的落点：
+
+```json
+{
+  "known_free": {
+    "deepseek-v4.1-flash": {
+      "source": "transcript:credit:0",
+      "first_seen": "2026-10-18T08:00:00+00:00",
+      "last_seen":  "2026-10-18T08:00:00+00:00",
+      "count": 9552
+    }
+  },
+  "known_free_last_scan_mtime": 1760000000.0
+}
+```
+
+**三条不变量**（改动这块前必读）：
+
+1. **不进 `PLATFORM_MODELS`** —— `known_free` 只并入候选池 / `next` 候选来源，
+   绝不写进平台模型注册表。否则 `_all_platform_ids()` 会把它当平台款，用量统计与
+   `source` 判定全部错位（孤儿用量误判）。
+2. **输出裸 id + 空前缀** —— 合成条目带 `_source: "known_free"`，前缀规则判空
+   （与平台内置同语义）。**不是 BYOK，不要加 `custom-local:`**。
+3. **豁免免费白名单过滤** —— `free_allowlist` 只过滤普通候选；`known_free` 模型即使用户
+   没勾选也保留在候选集里。否则就重现"明明免费却永远选不到"的原始缺陷。
+   要排除请用 `known-free clear`（显式动作），而不是让白名单沉默过滤。
+
+**增量扫描**：只处理 `mtime > known_free_last_scan_mtime` 的文件；损坏 JSON 行跳过不阻断；
+`learn` 与 state 写入都在 `state_file_lock()` 内完成（避免与其他命令写回互相覆盖）。
+
+> ⚠️ **`known_free` / `known_free_last_scan_mtime` 必须进 cmd_next 的 preserved 白名单**。
+> `next` 在「策略切换」时会重建 state 对象，只保留白名单内的键；漏了这两个键，一次
+> `next --strategy round-robin` 就会把学习成果静默抹掉，known_free 模型随即从候选集消失
+> （与 v5.6.0 的 `free_allowlist` 被丢是同一类缺陷，TC-FCP-011 守这一点）。
 
 ### 自动源切换（`--source auto`，默认）
 

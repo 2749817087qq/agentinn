@@ -1122,20 +1122,268 @@ except Exception:
     pass
 
 
-def build_free_candidate_pool(now=None, _scanner=None, _declared=None):
-    """默认候选集 = 扫描器 free_now 裸 id；BYOK 仅兜底。
+# ══════════════════════════════════════════════════════════════
+# 账号级免费学习（change: 2026-10-18-account-free-learn）
+# 能力：account-free-learning / display-name-mapping / free-candidate-pool
+# 设计见 .fstdd/changes/2026-10-18-account-free-learn/{design.md,specs}
+# ══════════════════════════════════════════════════════════════
 
-    返回 list[str]（裸 id）：
-      - 扫描器可用且有免费模型 → 直接返回其 free_ids（程序侧免费裸 id）
-      - 扫描器产出为空（无任何当前免费模型）→ 回退 load_declared_models()
-        的 BYOK（vendor=Custom）裸 id 作为兜底
+KNOWN_FREE_STATE_KEY = "known_free"
+TRANSCRIPT_SCAN_MTIME_KEY = "known_free_last_scan_mtime"
+
+
+def _load_known_free(state=None):
+    """读取 state 中的 known_free（dict[id]->entry）；缺失/异常返回空 dict。"""
+    st = state if state is not None else load_state()
+    kf = st.get(KNOWN_FREE_STATE_KEY)
+    return kf if isinstance(kf, dict) else {}
+
+
+def merge_known_free_models(models, _known_free=None):
+    """把 known_free 模型以合成条目并入 models（单一实现，cmd_next 与候选池共用）。
+
+    合成条目 _source=known_free ⇒ 调用方前缀规则判空（账号级免费，非 BYOK，
+    与平台内置同语义）。已存在的同 id 条目保留原条目（不重复、不覆盖能力位）。
+    """
+    kf = _known_free if _known_free is not None else _load_known_free()
+    if not kf:
+        return models
+    existing = {m.get("id") for m in models if m.get("id")}
+    extra = [{"id": mid, "name": mid, "_source": "known_free",
+              "supportsToolCall": True, "supportsImages": True,
+              "supportsReasoning": True}
+             for mid in kf
+             if isinstance(mid, str) and mid and mid not in existing]
+    return models + extra if extra else models
+
+
+def _is_num_zero(s):
+    """字符串数字是否为 0（如 credit='0' / '0.0'）；解析失败返回 False。"""
+    try:
+        return float(s) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_num_positive(s):
+    """字符串数字是否 > 0；解析失败返回 False。"""
+    try:
+        return float(s) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _extract_credits(obj):
+    """递归收集事件内所有 credit 字段值（真实 transcript 的 credit 可能在
+    providerData 深层，如 usage/cost 对象内；顶层查不到即漏学，见
+    change 2026-10-18-account-free-learn 实测）。"""
+    out = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "credit":
+                out.append(v)
+            else:
+                out.extend(_extract_credits(v))
+    elif isinstance(obj, list):
+        for v in obj:
+            out.extend(_extract_credits(v))
+    return out
+
+
+def learn_account_free(projects_root=None, now=None, _state=None):
+    """扫描 transcript（默认 ~/.workbuddy-ai/projects/**/*.jsonl），把显式
+    credit==0 的实际使用模型记入 known_free（经 normalize_model_name 归一为 id）。
+
+    保守不变量：仅显式 credit==0 才学习；credit 缺失/不可解析不学习并记录 warning
+    （绝不把付费当免费，可一键清空兜底）。已学条目出现付费记录 ⇒ 撤销（只加不减
+    会让收费款被长期当免费调度）。
+    增量：只处理 mtime > last_scan_mtime 的文件（状态记录 TRANSCRIPT_SCAN_MTIME_KEY）；
+    损坏 JSON 行跳过不阻断。
+    _state：测试注入隔离状态 dict（不落盘）；None 时读写真实 state。
+    返回 {"known_free": dict, "warnings": list, "scanned_files": int}。
+    """
+    if now is None:
+        now = now_utc()
+    root = projects_root if projects_root is not None else os.path.join(
+        os.path.expanduser("~"), ".workbuddy-ai", "projects")
+    state = _state if _state is not None else load_state()
+    known_free = _load_known_free(state)
+    last_mtime = state.get(TRANSCRIPT_SCAN_MTIME_KEY) or 0.0
+    warnings = []
+    missing_credit = {}
+    scanned = 0
+    files = []
+    if os.path.isdir(root):
+        files = sorted(
+            os.path.join(dp, f)
+            for dp, _, fns in os.walk(root)
+            for f in fns if f.endswith(".jsonl")
+        )
+    for path in files:
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime <= last_mtime:
+            continue
+        scanned += 1
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    # 预过滤：无 requestModelName 的行跳过（credit 缺失但有模型名
+                    # 的行须进入解析以产生 SC-AFL-003 的跳过 warning）。
+                    if '"requestModelName"' not in line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except ValueError:
+                        continue  # 损坏行跳过不阻断（SC-AFL-007）
+                    pd = ev.get("providerData") or {}
+                    name = pd.get("requestModelName")
+                    if not isinstance(name, str) or not name:
+                        continue
+                    credits = _extract_credits(ev)
+                    # 保守判定：任一付费（>0）→ 不学（哪怕同事件混有 0）；全缺失 → warning
+                    has_zero = any(c == 0 or (isinstance(c, str) and _is_num_zero(c)) for c in credits)
+                    has_paid = any(
+                        (isinstance(c, (int, float)) and c > 0)
+                        or (isinstance(c, str) and _is_num_positive(c))
+                        for c in credits
+                    )
+                    if has_zero and not has_paid:
+                        mid = normalize_model_id(normalize_model_name(name))
+                        if not mid:
+                            continue
+                        entry = known_free.setdefault(mid, {
+                            "source": "transcript:credit:0",
+                            "first_seen": None,
+                            "last_seen": None,
+                            "count": 0,
+                        })
+                        if entry.get("first_seen") is None:
+                            entry["first_seen"] = now.isoformat()
+                        entry["last_seen"] = now.isoformat()
+                        entry["count"] = entry.get("count", 0) + 1
+                    elif has_paid:
+                        # 撤销：已学条目出现付费记录 ⇒ 它不再是账号级免费（促销到期/口径变更）。
+                        # 只加不减会让 agentinn 继续把收费款当免费调度（静默烧积分），
+                        # 故此处主动撤销（保守方向：宁可少用，不可错用）。
+                        mid = normalize_model_id(normalize_model_name(name))
+                        if mid in known_free:
+                            known_free.pop(mid, None)
+                            warnings.append(
+                                f"模型 {mid} 出现付费记录，已从 known_free 撤销")
+                    elif not credits:
+                        # 按模型聚合计数，循环结束后汇总成一条 warning：
+                        # 逐行 append 会在真实 transcript 上产出数万条（实测 39269 条）。
+                        missing_credit[name] = missing_credit.get(name, 0) + 1
+                    # 有付费记录但未学过 → 不学习（保守，SC-AFL-002）
+        except OSError as exc:
+            warnings.append(f"transcript 读取失败 {path}（{type(exc).__name__}）")
+            continue
+    state[KNOWN_FREE_STATE_KEY] = known_free
+    for nm in sorted(missing_credit):
+        warnings.append(
+            f"模型 {nm} credit 字段缺失/不可解析，跳过 {missing_credit[nm]} 条")
+    if scanned and files:
+        try:
+            state[TRANSCRIPT_SCAN_MTIME_KEY] = max(os.path.getmtime(p) for p in files)
+        except OSError:
+            pass
+    if _state is None:
+        try:
+            with state_file_lock():
+                save_state(state)
+        except TimeoutError:
+            warnings.append("state 写锁超时，known_free 本次未落盘")
+    return {"known_free": known_free, "warnings": warnings, "scanned_files": scanned}
+
+
+def cmd_known_free(args, _state=None):
+    """known-free list|clear|learn —— 查看/清空/学习账号级免费结果（SC-AFL-004/005）。
+
+    输出契约：结果一律走 **stdout**（CLI 使用者只能看到 stdout；返回值会被
+    `handlers[cmd](args)` 丢弃 —— 早期实现只 return 不 print，导致三条子命令
+    全部静默无输出，属 EXP-2026-0015 类测试幻觉）。
+    _state：测试注入隔离状态 dict（不落盘）；None 时读写真实 state。
+    """
+    action = getattr(args, "action", "list") if args is not None else "list"
+    state = _state if _state is not None else load_state()
+    kf = _load_known_free(state)
+    if action == "clear":
+        state[KNOWN_FREE_STATE_KEY] = {}
+        # 同时重置增量位：否则 clear 后 learn 会因 mtime 已推进而"什么都没扫"，
+        # 用户以为清空即可重学，实际永远学不回来。
+        state.pop(TRANSCRIPT_SCAN_MTIME_KEY, None)
+        if _state is None:
+            try:
+                with state_file_lock():
+                    save_state(state)
+            except TimeoutError:
+                print("known_free clear 失败：state 写锁超时")
+                return
+        print("known_free cleared")
+        return
+    if action == "learn":
+        # 真实 CLI（_state is None）必须让 learn_account_free 自己落盘：
+        # 若把 state 当 _state 传下去，函数会按"测试注入"处理而**跳过 save_state**
+        # ⇒ learn 永不落盘（实测踩过）。
+        res = learn_account_free() if _state is None else learn_account_free(_state=state)
+        n = len(res["known_free"])
+        msg = f"learned {n} model(s)" if n else "known_free (empty)"
+        if res["scanned_files"]:
+            msg += f"  scanned={res['scanned_files']}"
+        if res["warnings"]:
+            msg += f"  warnings={len(res['warnings'])}"
+        print(msg)
+        return
+    if not kf:
+        print("(empty)")
+        return
+    lines = []
+    for mid in sorted(kf):
+        e = kf[mid]
+        lines.append(f"{mid}  source={e.get('source')}  last_seen={e.get('last_seen')}  count={e.get('count')}")
+    print("\n".join(lines))
+
+
+def cmd_mapping(args):
+    """mapping list —— 展示 显示名 → 配置 id 映射表（SC-DNM-005 可发现性）。
+
+    transcript 里 requestModelName 是大写显示名，配置 id 为小写；未命中映射表的
+    显示名按原样回退（大小写不敏感匹配由平台负责，本表只覆盖已知错位项）。
+    """
+    lines = [f"{k}  ->  {v}" for k, v in sorted(DISPLAY_NAME_MAPPING.items())]
+    if not lines:
+        print("(empty)")
+        return
+    print(f"# display_name -> model_id  (共 {len(lines)} 条)")
+    print("\n".join(lines))
+
+
+def build_free_candidate_pool(now=None, _scanner=None, _declared=None, _known_free=None):
+    """默认候选集 = 扫描器 free_now 裸 id ∪ known_free（账号级免费学习）；BYOK 仅兜底。
+
+    返回 list[str]（裸 id，保序去重）：
+      - 扫描器可用且有免费模型 → scanner.free_ids（程序侧免费裸 id）
+      - 扫描器产出为空（无当前免费模型）→ 回退 load_declared_models() 的
+        BYOK（vendor=Custom）裸 id 作为兜底
+      - known_free（学习自 transcript credit:0）恒并入（账号级免费，非 BYOK，
+        输出裸 id、调用方不得加 custom-local: 前缀）
     调用方对 BYOK 兜底项加 'custom-local:' 前缀（见 cmd_next 的 recommended_prefix）。
     """
     scanner = _scanner if _scanner is not None else _get_scanner(now)
+    pool = []
     if scanner is not None and scanner.get("available") and scanner.get("free_ids"):
-        return list(scanner["free_ids"])
-    declared = _declared if _declared is not None else load_declared_models()
-    return [m["id"] for m in declared if m.get("vendor") == "Custom"]
+        pool = list(scanner["free_ids"])
+    else:
+        declared = _declared if _declared is not None else load_declared_models()
+        pool = [m["id"] for m in declared if m.get("vendor") == "Custom"]
+    kf = _known_free if _known_free is not None else _load_known_free()
+    for mid in kf:
+        if isinstance(mid, str) and mid and mid not in pool:
+            pool.append(mid)
+    return pool
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2078,6 +2326,34 @@ def normalize_model_id(raw_id):
     return s
 
 
+# 显示名 ↔ 配置 id 映射（change: 2026-10-18-account-free-learn）
+# 来源：transcript providerData.requestModelName 为大写显示名（Deepseek-V4.1-Flash /
+# Hy3 / Step-5-Preview），配置 models[].id 为小写（deepseek-v4.1-flash / hy3 /
+# step-5-preview）。映射表可配置扩展；未命中回退原值。
+DISPLAY_NAME_MAPPING = {
+    "Deepseek-V4.1-Flash": "deepseek-v4.1-flash",
+    "Hy3": "hy3",
+    "Step-5-Preview": "step-5-preview",
+}
+
+
+def normalize_model_name(raw):
+    """显示名 → 归一 id：保留 custom-local: 前缀，映射命中返回 id，未命中原样回退。
+
+    幂等：映射表 key 均为显示名，已归一 id（小写）不匹配任何 key，二次调用不变。
+    非字符串 / 空串原样返回（上层做空值校验）。
+    """
+    if not isinstance(raw, str) or not raw:
+        return raw
+    prefix = ""
+    body = raw
+    while body.startswith(_PREFIX_CANONICAL):
+        prefix += _PREFIX_CANONICAL
+        body = body[len(_PREFIX_CANONICAL):]
+    mapped = DISPLAY_NAME_MAPPING.get(body, body)
+    return prefix + mapped
+
+
 def load_models(source="custom"):
     """
     加载模型。source 决定模型来源：
@@ -2736,6 +3012,15 @@ def cmd_next(args):
     maybe_discover_qoder_free()
     source, window_reason = resolve_source(getattr(args, "source", "auto"))
     models = load_models(source)
+    # 账号级免费学习（change 2026-10-18-account-free-learn）：known_free 模型并入
+    # 候选来源（不在 models.json/平台免费清单，但实测账号免费可用 credit:0）。
+    # _source=known_free → recommended_prefix 判空（非 BYOK，同平台语义）。
+    kf_ids = _load_known_free()
+    kf_set = set(kf_ids) if kf_ids else set()
+    # 账号级免费学习（change 2026-10-18-account-free-learn）：known_free 模型并入
+    # 候选来源（不在 models.json/平台免费清单，但实测账号免费可用 credit:0）。
+    # 合并逻辑统一在 merge_known_free_models（与 build_free_candidate_pool 同源）。
+    models = merge_known_free_models(models, kf_ids)
     if not models:
         print(json.dumps({"error": "No models available", "source": source}, ensure_ascii=False))
         sys.exit(1)
@@ -2754,13 +3039,21 @@ def cmd_next(args):
 
     if allowlist_ids:
         allowed = set(allowlist_ids)
+
+        def _allow(m):
+            # 账号级免费（known_free）豁免白名单：这些是 transcript 实测 credit:0 的
+            # 账号级免费模型，若因"未勾选"被静默剔除，就重现了"明明免费却永远选不到"
+            # 的原始缺陷（本 change 要解决的问题）。要排除请走 `known-free clear`
+            # 显式兜底，而不是让白名单沉默过滤。
+            return m["id"] in allowed or m["id"] in kf_set
+
         # 被白名单挡掉的**可用**模型也记进 blocked：既有契约是"谁因为什么被跳过"，
         # 静默丢弃会让调用方无法解释候选集为何变小。
         blocked = blocked + [{"model": m["id"], "reason": "不在免费白名单内（未勾选）"}
-                             for m in available if m["id"] not in allowed]
+                             for m in available if not _allow(m)]
         # 显式排序保证确定性：白名单内（真正不可用）在前，其余按 id
         blocked.sort(key=lambda b: (0 if b["model"] in allowed else 1, b["model"]))
-        available = [m for m in available if m["id"] in allowed]
+        available = [m for m in available if _allow(m)]
 
     # 额度告警：只覆盖白名单内模型（未勾选的不打扰用户）
     alerts = collect_free_quota_alerts(models, usage, allowlist_ids)
@@ -2786,8 +3079,12 @@ def cmd_next(args):
         # 注意：free_allowlist 必须一并保留 —— 它属于**用户确认结果**而非轮次状态，
         # 重建 state 时丢掉它会让白名单在"策略切换"时静默失效（TC-FMC-005 守这一点）。
         # v5.6.0：relay_onboard 同理必须保留，否则策略切换会静默抹掉向导确认结果。
+        # v5.7.6：known_free / 增量位同属"学习成果"而非轮次状态 —— 实测切策略即被
+        # 静默抹掉，known_free 模型随即从候选集消失（同 free_allowlist 那类缺陷）。
         preserved = {k: v for k, v in state.items()
-                     if k.startswith("rr_") or k in (FREE_ALLOWLIST_KEY, RELAY_ONBOARD_KEY, "cost_gate")}
+                     if k.startswith("rr_") or k in (FREE_ALLOWLIST_KEY, RELAY_ONBOARD_KEY,
+                                                     "cost_gate", KNOWN_FREE_STATE_KEY,
+                                                     TRANSCRIPT_SCAN_MTIME_KEY)}
         # 显式排序保证确定性：消除对 dict 迭代顺序的依赖（P3-21）
         preserved_sorted = {k: preserved[k] for k in sorted(preserved)}
         state = {"strategy": strategy, "index": 0, "history": state.get("history", []),
@@ -5738,6 +6035,15 @@ def main():
                       help="sync=强刷发现并写 models.json；status=CLI 可达性+relay 状态；"
                            "relay-start/stop/status=本地 relay 进程管理（方案 A）")
 
+    p_kf = sub.add_parser("known-free", help="账号级免费学习结果（transcript credit:0）")
+    p_kf.add_argument("action", choices=["list", "clear", "learn"], nargs="?", default="list",
+                      help="list=列出 known_free；learn=立即扫描 transcript 学习；"
+                           "clear=一键清空（误学兜底）")
+
+    p_map = sub.add_parser("mapping", help="显示名↔配置 id 映射（transcript 大写名归一）")
+    p_map.add_argument("action", choices=["list"], nargs="?", default="list",
+                       help="list=列出 DISPLAY_NAME_MAPPING（未命中的显示名原样回退）")
+
     args = parser.parse_args()
 
     # 改名后一次性数据迁移：旧名文件 → 新名（只读旧、写新、保留旧；幂等、失败静默）。
@@ -5769,6 +6075,8 @@ def main():
         "clear-exhausted": cmd_clear_exhausted,
         "doctor": cmd_doctor,
         "qoder-free": cmd_qoder_free,
+        "known-free": cmd_known_free,
+        "mapping": cmd_mapping,
     }
     handlers[args.command](args)
 
