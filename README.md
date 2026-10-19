@@ -1,6 +1,6 @@
 # AgentInn — 多模型接棒器（免费模型中继）
 
-> **版本**：v5.7.1 ｜ **触发**：`免费模型`、`free model relay`、`子代理接棒`、`模型接棒` 等（见文末触发词清单）
+> **版本**：v5.7.6 ｜ **仓库**：<https://github.com/2749817087qq/agentinn>（公开）｜ **触发**：`免费模型`、`free model relay`、`子代理接棒`、`模型接棒` 等（见文末触发词清单）
 >
 > 读取 `~/.workbuddy/models.json` 中的自定义免费模型，在 FSTDD 四阶段流程的子代理委派点用这些模型启动 Agent，实现「每个会话通过子代理接棒使用免费 AI」的目标。
 
@@ -27,10 +27,32 @@ WorkBuddy 的 Agent 工具 `model` 参数接受模型 ID。`models.json` 中的�
 
 ## 安装
 
-将整个 `agentinn/` 目录复制到 WorkBuddy 的 skills 目录之一：
+本仓库根目录**就是** skill 本体（v5.7.1 起改了打包方式，不再需要解 zip / 跑安装器）。任选一种方式取到目录，再整目录放进 WorkBuddy 的 skills 目录之一：
 
 - `~/.workbuddy/skills/agentinn`（WorkBuddy 根）
 - `~/.workbuddy-ai/skills/agentinn`（WorkBuddy AI 根）
+
+**方式 A：git clone（可 `git pull` 升级）**
+
+```bash
+git clone https://github.com/2749817087qq/agentinn.git agentinn
+cp -r agentinn ~/.workbuddy/skills/agentinn      # 或 ~/.workbuddy-ai/skills/agentinn
+```
+
+**方式 B：下载 tarball（无需 git）**
+
+```bash
+curl -L https://codeload.github.com/2749817087qq/agentinn/tar.gz/refs/heads/main \
+  | tar xz -C /tmp && cp -r /tmp/agentinn-main ~/.workbuddy/skills/agentinn
+```
+
+**方式 C：指定版本**
+
+```bash
+git clone -b v5.7.6 --depth 1 https://github.com/2749817087qq/agentinn.git agentinn
+```
+
+装完自检：`python ~/.workbuddy/skills/agentinn/scripts/pick_model.py doctor`。
 
 `bin/agentinn`（POSIX / Git Bash）与 `bin/agentinn.cmd`（Windows）是启动器；若 `~/.workbuddy/bin` 已在 PATH，把这两个文件放进该目录即可在终端直接使用 `agentinn` 命令；否则直接用 `python scripts/pick_model.py <子命令>` 亦可。
 
