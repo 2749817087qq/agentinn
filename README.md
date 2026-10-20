@@ -1,6 +1,6 @@
 # AgentInn — 多模型接棒器（免费模型中继）
 
-> **版本**：v5.7.6 ｜ **仓库**：<https://github.com/2749817087qq/agentinn>（公开）｜ **触发**：`免费模型`、`free model relay`、`子代理接棒`、`模型接棒` 等（见文末触发词清单）
+> **版本**：v5.7.7 ｜ **仓库**：<https://github.com/2749817087qq/agentinn>（公开）｜ **触发**：`免费模型`、`free model relay`、`子代理接棒`、`模型接棒` 等（见文末触发词清单）
 >
 > 读取 `~/.workbuddy/models.json` 中的自定义免费模型，在 FSTDD 四阶段流程的子代理委派点用这些模型启动 Agent，实现「每个会话通过子代理接棒使用免费 AI」的目标。
 
@@ -24,6 +24,7 @@ WorkBuddy 的 Agent 工具 `model` 参数接受模型 ID。`models.json` 中的�
 7. **时段感知** — 平台模型免费时段（由程序缓存扫描器动态判定）自动纳入，收费时段自动切回自定义模型。
 8. **多策略** — `round-robin` / `fallback` / `capability-match` / `auto` 四种调度策略。
 9. **额度告警** — 白名单内模型免费额度用尽时弹窗通知（`record` / `next` 输出 `quota_alerts`）。
+10. **开机自启 + 免费声明**（v5.7.7）— relay 随登录自动拉起（`qoder-free autostart install`），重启后不再出现「模型在列表里但请求全失败」；qoder 模型按**声明名单**写进下拉框，免费款轮换时 `sync` 会用 `stale` / `undetermined` 显式提醒。
 
 ## 安装
 
@@ -70,7 +71,10 @@ git clone -b v5.7.6 --depth 1 https://github.com/2749817087qq/agentinn.git agent
 | `origins` | 列出模型来源（relay / 桥接 / 平台） |
 | `relay-window` | 时段确认窗口回传处理 |
 | `qoder-free sync` / `qoder-free status` | 刷新 / 探活 **qoderclicn 直扫**（v5.7.x 起）：agentinn 直接调用官方 `qoderclicn --list-models` 发现模型（owner=`qoderCliOwner`，url 翻转为本地 relay `http://127.0.0.1:8799/v1`，`qodercli_gateway` 保留真实网关 `https://gateway.qoder.com.cn/v1` 备查，apiKey 留空）。**不再依赖已删除的本地网关 `http://127.0.0.1:8210/v1`**。子命令名沿用历史；`status` 显示 `cli_bin` / `cli_found` / `reachable` / `models` / `relay` |
-| `qoder-free relay-start` / `relay-stop` / `relay-status` | 管理 **本地 qoderclicn relay**（方案 A 落地）：relay 复用 qoderclicn 自己的浏览器会话（不逆向 token），把 OpenAI 形状请求 shell-out 到 `qoderclicn -p -m <model>` 补全。使用前必须先 `relay-start`，否则 15 条 qodercli 模型指向的 8799 端口无服务。详见 `SKILL.md`「Qoderclicn 本地 relay」 |
+| `qoder-free relay-start` / `relay-stop` / `relay-status` | 管理 **本地 qoderclicn relay**（方案 A 落地）：relay 复用 qoderclicn 自己的浏览器会话（不逆向 token），把 OpenAI 形状请求 shell-out 到 `qoderclicn -p -m <model>` 补全。v5.7.7 起正常安装会注册**开机自启**并在登录时自动拉起，故 `relay-start` 是**兜底命令**——先 `qoder-free autostart status` 看 `registered` / `running`，都为 false 时再手动起。详见 `SKILL.md`「Qoderclicn 本地 relay」 |
+| `qoder-free autostart install` / `uninstall` / `status` | **开机自启**（v5.7.7）：写平台原生启动项（Windows Startup `.vbs` / Linux XDG `.desktop` / macOS LaunchAgent），登录即拉起 relay。产物明文无凭据；`install` 幂等且不打断在用会话，`uninstall` 只摘自启不杀进程，`status` 报 `registered` / `running` / `stale` |
+| `qoder-free free-set --ids <id,...>` / `free-show` / `free-reset` | **免费模型声明**（v5.7.7）：`qoderclicn --list-models` 没有免费/付费字段，故改为声明式——只有声明过的 id 才写进下拉框；无声明回落内置默认 `Qwen3.8-Flash` |
+| `qoder-free sync [--all]` | 按声明刷新 `models.json`；返回 `declared` / `source` / `stale` / `undetermined` / `removed_ids`。`stale`（声明有、CLI 已无）与 `undetermined`（CLI 有、未声明）都只报不写；删除前先 `models.json.bak-<ts>` 备份，且只动 `qoderCliOwner=qoderclicn` 的条目。`--all` 显式越权写全部 |
 
 ## 触发词
 

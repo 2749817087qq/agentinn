@@ -3081,10 +3081,13 @@ def cmd_next(args):
         # v5.6.0：relay_onboard 同理必须保留，否则策略切换会静默抹掉向导确认结果。
         # v5.7.6：known_free / 增量位同属"学习成果"而非轮次状态 —— 实测切策略即被
         # 静默抹掉，known_free 模型随即从候选集消失（同 free_allowlist 那类缺陷）。
+        # v5.7.7：qoder_free_ids 是**用户声明结果**，同属必须保留之列，否则
+        # `next --strategy X` 一次就把免费名单静默还原成内置默认。
         preserved = {k: v for k, v in state.items()
                      if k.startswith("rr_") or k in (FREE_ALLOWLIST_KEY, RELAY_ONBOARD_KEY,
                                                      "cost_gate", KNOWN_FREE_STATE_KEY,
-                                                     TRANSCRIPT_SCAN_MTIME_KEY)}
+                                                     TRANSCRIPT_SCAN_MTIME_KEY,
+                                                     QODER_FREE_IDS_KEY)}
         # 显式排序保证确定性：消除对 dict 迭代顺序的依赖（P3-21）
         preserved_sorted = {k: preserved[k] for k in sorted(preserved)}
         state = {"strategy": strategy, "index": 0, "history": state.get("history", []),
@@ -3812,6 +3815,31 @@ def cmd_doctor(args):
         f"FMR_MODELS_JSON={os.environ.get('FMR_MODELS_JSON') or '未设'}",
         False, "如需固定数据根，设 FMR_DATA_ROOT 或 FMR_MODELS_JSON 环境变量"))
 
+    # ── 开机自启注册状态（v5.7.7 / SC-303）────────────────────────
+    # 回答「模型明明在列表里，为什么请求全失败」：重启后 relay 没被自动拉起。
+    # ⚠️ 必须用**非网络**探活（`_relay_pid_alive`）：doctor 默认零网络（SC-DOC-009），
+    #    走 `_relay_is_running()` 的 socket 会被零网络探针判红。
+    try:
+        _ast = _autostart_status(_port_fn=lambda _p: _relay_pid_alive())
+    except Exception:
+        _ast = {}
+    if isinstance(_ast, dict):
+        _registered = bool(_ast.get("registered"))
+        _running = bool(_ast.get("running"))
+        _msg = (f"自启 registered={str(_registered).lower()}；"
+                f"relay running={str(_running).lower()}")
+        if _registered:
+            _msg += f"；产物={_ast.get('path')}"
+            if _ast.get("stale"):
+                _msg += "；stale=true（产物引用的脚本已不存在，建议重新 install）"
+        if not _registered and not _running:
+            issues.append(_issue(
+                "warn", "autostart",
+                _msg + "；重启后 relay 不会自动拉起，模型仍在列表里但请求会失败",
+                False, "运行 `agentinn qoder-free autostart install` 注册开机自启"))
+        else:
+            issues.append(_issue("info", "autostart", _msg, False, ""))
+
     # models.json 缺失 / 无可用模型
     if not os.path.exists(MODELS_JSON):
         issues.append(_issue("error", "models_missing",
@@ -3859,6 +3887,17 @@ def cmd_doctor(args):
     for m in models:
         key = m.get("apiKey")
         if not key:
+            # 桥接条目（qodercli relay）的空 apiKey 是**设计使然**：鉴权由本地 relay
+            # 背后的 qoderclicn 会话负责，relay 忽略 Authorization（v5.7.7 / SC-301）。
+            # 豁免条件必须**同时**满足 bridged 与 qodercli_relay —— 任一缺失都仍按
+            # 真实空 key 报 error，避免放宽判据把真错误一起放过（SC-302）。
+            if m.get("bridged") and m.get("qodercli_relay"):
+                issues.append(_issue(
+                    "info", "apikey_bridged",
+                    f"模型 {m['id']} 的 apiKey 为空，由本地 relay 提供鉴权"
+                    f"（qoderclicn 会话鉴权，非缺陷）",
+                    False, ""))
+                continue
             issues.append(_issue(
                 "error", "apikey_missing",
                 f"模型 {m['id']} 没有 apiKey，该模型完全不可用",
@@ -4514,18 +4553,23 @@ def _touch_qoder_cli_discovery():
         pass
 
 
-def discover_qoder_free(force=False, _probe=None):
-    """调用官方 qoderclicn --list-models 发现模型，以 Custom 条目（带 qoderCliOwner）
-    幂等写入 models.json。全程不抛异常、不刷 stdout（D6 零阻断）。
+def discover_qoder_free(force=False, _probe=None, all_models=False, _state=None):
+    """调用官方 qoderclicn --list-models 发现模型，按**免费声明**过滤后幂等写入 models.json。
+
+    背景（v5.7.7）：`qoderclicn --list-models` 只输出模型名，没有任何免费/付费字段，
+    relay 的 usage 也全是 -1 ⇒ 免费与否在数据上不可判定。因此改为**声明式**：
+    只有 state["qoder_free_ids"] 里列出的 id 才写进下拉框（无声明则用内置默认自举），
+    其余 CLI 模型既不写入、也不静默丢弃，而是以 `undetermined` 显式报出（SC-207）。
 
     与已删除的 qoder-free 8210 网关不同：此处不依赖任何常驻进程 / OpenAI 端点，
     直接读官方 CLI 的模型清单。模型条目 url 指向本地 relay（方案 A：复用 qoderclicn
     自身会话打真实网关，绝不逆向 access_token），apiKey 留空（relay 忽略 Authorization）。
-    真实官方网关记录在 qodercli_gateway 字段备查。使用层见 SKILL.md「Qoderclicn 直扫」。
 
     幂等：同 id 已带 qoderCliOwner → 更新；同 id 带其它 owner → 跳过不覆盖。
-    force=True 时无视 TTL（供 `relay qoder-free sync` 显式强刷；子命令名沿用历史）。
-    _probe 可注入（单测不触真 CLI）：传入 callable(bin_path)->list[str]。
+    迁移清理：本 skill 自己写过（bridged=true 且 qoderCliOwner=qoderclicn）但已不在
+    声明里的条目会被移除，**删除前先备份**（SC-208），且绝不触碰用户自建条目（SC-209）。
+    all_models=True 时忽略声明写全部（`--all` 显式越权，SC-205）。
+    _probe / _state 可注入（单测不触真 CLI、不读写真实 state）。
     """
     bin_path = resolve_qoder_cli_bin()
     if not bin_path:
@@ -4541,18 +4585,42 @@ def discover_qoder_free(force=False, _probe=None):
         _record_qoder_free_limit(load_usage(), [])
         return {"ok": True, "discovered": 0, "reason": "empty", "models": []}
 
+    declared, decl_source = _qoder_free_declared(_state)
+    if all_models:
+        target_ids = list(models)
+        stale, undetermined = [], []
+    else:
+        target_ids = [m for m in models if m in declared]
+        stale = [d for d in declared if d not in models]         # 声明有、CLI 已无（SC-206）
+        undetermined = [m for m in models if m not in declared]  # CLI 有、未声明（SC-207）
+
     before, err = _load_models_json_raw()
     if err is not None:
         return {"ok": False, "reason": "models_json_unreadable", "discovered": 0}
-    out = [dict(e) if isinstance(e, dict) else e for e in before]
+
+    keep_ids = set(target_ids)
+    out = []
+    removed_ids = []
+    for entry in before:
+        if not isinstance(entry, dict):
+            out.append(entry)
+            continue
+        # 双重限定：只有「本 skill 自己写的桥接条目」才允许被移除（SC-208/SC-209）
+        owned_by_us = (entry.get(QODER_CLI_OWNER_KEY) == QODER_CLI_OWNER_VALUE
+                       and bool(entry.get("bridged")))
+        if owned_by_us and entry.get("id") not in keep_ids:
+            removed_ids.append(entry.get("id"))
+            continue
+        out.append(dict(entry))
+
     discovered = 0
     updated = 0
     skipped = 0
-    for mid in models:
+    for mid in target_ids:
         new_entry = {
             "id": mid,
             "vendor": "Custom",
-            "url": QODER_CLI_RELAY_DEFAULT,     # 指向本地 relay（方案 A），由 relay 复用 qoderclicn 会话
+            "url": QODER_CLI_RELAY_DEFAULT,     # 指向本地 relay（方案 A）
             "apiKey": "",                       # relay 忽略 Authorization，鉴权由 qoderclicn 会话负责
             "bridged": True,
             "bridge_tool": "qodercli",
@@ -4580,17 +4648,29 @@ def discover_qoder_free(force=False, _probe=None):
     if perr:
         return {"ok": False, "reason": "persist_failed", "detail": perr, "discovered": 0}
     _touch_qoder_cli_discovery()
-    _record_qoder_free_limit(load_usage(), models)
-    return {
+    _record_qoder_free_limit(load_usage(), target_ids)
+    result = {
         "ok": True,
         "discovered": discovered,
         "updated": updated,
         "skipped": skipped,
+        "removed_ids": removed_ids,
+        "declared": declared,
+        "source": decl_source,
+        "stale": stale,
+        "undetermined": undetermined,
+        "all": bool(all_models),
         "models": models,
         "base": base,
         "written_to": MODELS_JSON,
         "backup": os.path.basename(backup) if backup else None,
     }
+    if stale:
+        result["hint"] = ("声明中的 " + ", ".join(stale) +
+                          " 已不在 CLI 清单里；用 `qoder-free free-set --ids <新id>` 重设，"
+                          "或 `qoder-free free-reset` 回落内置默认")
+    return result
+
 
 
 def maybe_discover_qoder_free(force=False, _probe=None):
@@ -4627,9 +4707,53 @@ def cmd_qoder_free(args):
     action = getattr(args, "qf_action", None)
     bin_path = resolve_qoder_cli_bin()
     if action == "sync":
-        result = discover_qoder_free(force=True)
+        result = discover_qoder_free(force=True,
+                                     all_models=bool(getattr(args, "qf_all", False)))
         print(json.dumps(result, ensure_ascii=False, indent=2))
         sys.exit(0 if result.get("ok") else 1)
+    if action == "free-set":
+        ids = _parse_ids_arg(getattr(args, "qf_ids", None))
+        if not ids:
+            print(json.dumps({"ok": False, "reason": "no_ids",
+                              "hint": "用法: qoder-free free-set --ids Qwen3.8-Flash,Qwen3.7-Flash"},
+                             ensure_ascii=False))
+            sys.exit(1)
+        _set_qoder_free_ids(ids)
+        decl, source = _qoder_free_declared()
+        print(json.dumps({"ok": True, "ids": decl, "source": source,
+                          "written_to": STATE_FILE}, ensure_ascii=False, indent=2))
+        sys.exit(0)
+    if action == "free-show":
+        decl, source = _qoder_free_declared()
+        print(json.dumps({"ok": True, "ids": decl, "source": source,
+                          "default_ids": QODER_FREE_DEFAULT_IDS},
+                         ensure_ascii=False, indent=2))
+        sys.exit(0)
+    if action == "free-reset":
+        _, removed = _reset_qoder_free_ids()
+        decl, source = _qoder_free_declared()
+        print(json.dumps({"ok": True, "removed": removed, "ids": decl,
+                          "source": source}, ensure_ascii=False, indent=2))
+        sys.exit(0)
+    if action == "autostart":
+        sub = getattr(args, "qf_sub", None)
+        if sub == "install":
+            _res = _autostart_install()
+            print(json.dumps(_res, ensure_ascii=False, indent=2))
+            # 退出码必须反映真实结果：安装器据此区分「完成」与「跳过」，
+            # 恒 exit 0 会把失败报成完成（评审 P1-3）。
+            sys.exit(0 if _res.get("ok") else 1)
+        if sub == "uninstall":
+            _res = _autostart_uninstall()
+            print(json.dumps(_res, ensure_ascii=False, indent=2))
+            sys.exit(0 if _res.get("ok") else 1)
+        if sub == "status":
+            print(json.dumps(_autostart_status(), ensure_ascii=False, indent=2))
+            sys.exit(0)
+        print(json.dumps({"ok": False,
+                          "error": "autostart 需要子动作 install|uninstall|status"},
+                         ensure_ascii=False))
+        sys.exit(1)
     if action == "status":
         info = {
             "cli_bin": bin_path,
@@ -4793,6 +4917,376 @@ def _relay_status():
     return {"ok": True, "port": port, "running": running,
             "pid": (pid if running else None),
             "script": QODER_CLI_RELAY_SCRIPT}
+
+
+# ── 开机自启注册（登录时拉起 relay）────────────────────────────────
+#
+# 设计（design.md 决策 1/2）：产物是**明文、不含任何凭据**的平台原生启动项，
+# 三平台各一个落点；内容里只写「解释器路径 + relay 脚本路径 + 端口 + 日志路径」。
+# 落点与内容都是纯函数（platform/home/appdata 可注入），故 Linux/macOS 分支
+# 可在 Windows 上做内容断言，不依赖目标机真实登录（SC-109）。
+AUTOSTART_ARTIFACT_WIN = "agentinn-relay.vbs"
+AUTOSTART_ARTIFACT_LINUX = "agentinn-relay.desktop"
+AUTOSTART_ARTIFACT_MAC = "local.agentinn.relay.plist"
+AUTOSTART_LOG = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "relay-autostart.log")
+
+
+def _autostart_platform(platform=None):
+    """归一化平台名 → windows / macos / linux（未知平台按 linux 处理）。"""
+    p = (platform if platform is not None else sys.platform) or ""
+    if p.startswith("win"):
+        return "windows"
+    if p.startswith("darwin"):
+        return "macos"
+    return "linux"
+
+
+def _autostart_target_path(platform=None, home=None, appdata=None):
+    """自启产物的绝对路径（三平台分派，纯函数）。
+
+    Windows → %APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\agentinn-relay.vbs
+    macOS   → ~/Library/LaunchAgents/local.agentinn.relay.plist
+    Linux   → ~/.config/autostart/agentinn-relay.desktop
+    """
+    kind = _autostart_platform(platform)
+    home = home if home is not None else HOME
+    if kind == "windows":
+        base = appdata or os.environ.get("APPDATA") or os.path.join(
+            home, "AppData", "Roaming")
+        return os.path.join(base, "Microsoft", "Windows", "Start Menu",
+                            "Programs", "Startup", AUTOSTART_ARTIFACT_WIN)
+    if kind == "macos":
+        return os.path.join(home, "Library", "LaunchAgents", AUTOSTART_ARTIFACT_MAC)
+    return os.path.join(home, ".config", "autostart", AUTOSTART_ARTIFACT_LINUX)
+
+
+def _autostart_python(platform=None):
+    """自启使用的解释器：Windows 用 pythonw.exe（无控制台窗口），其它用当前解释器。"""
+    exe = sys.executable or "python"
+    if _autostart_platform(platform) != "windows":
+        return exe
+    cand = os.path.join(os.path.dirname(exe), "pythonw.exe")
+    if os.path.exists(cand):
+        return cand
+    if os.path.basename(exe).lower() == "python.exe":
+        return os.path.join(os.path.dirname(exe), "pythonw.exe")
+    return exe
+
+
+def _autostart_render(platform=None, script=None, python=None, log=None, port=None):
+    """生成自启产物全文（纯函数；**不含任何凭据**，SC-106）。
+
+    Windows → VBScript（WScript.Shell.Run 窗口模式 0 = 无黑框，失败写日志后退出）
+    Linux   → freedesktop .desktop（XDG autostart）
+    macOS   → LaunchAgent plist（RunAtLoad）
+    """
+    kind = _autostart_platform(platform)
+    script = script or QODER_CLI_RELAY_SCRIPT
+    python = python or _autostart_python(platform)
+    log = log or AUTOSTART_LOG
+    port = int(port if port is not None else QODER_CLI_RELAY_PORT)
+    host = QODER_CLI_RELAY_HOST
+
+    if kind == "windows":
+        workdir = os.path.dirname(script) or "."
+        return (
+            "' agentinn relay autostart - generated by agentinn, no credentials\n"
+            "Option Explicit\n"
+            "Dim fso, sh, py, relay, logf, cmd, rc\n"
+            'Set fso = CreateObject("Scripting.FileSystemObject")\n'
+            'Set sh = CreateObject("WScript.Shell")\n'
+            'py = "' + python + '"\n'
+            'relay = "' + script + '"\n'
+            'logf = "' + log + '"\n'
+            "If Not fso.FileExists(relay) Then\n"
+            '  fso.OpenTextFile(logf, 8, True).WriteLine Now & " [ERROR] relay script missing: " & relay\n'
+            "  WScript.Quit 1\n"
+            "End If\n"
+            "If Not fso.FileExists(py) Then\n"
+            '  fso.OpenTextFile(logf, 8, True).WriteLine Now & " [ERROR] interpreter missing: " & py\n'
+            "  WScript.Quit 1\n"
+            "End If\n"
+            'sh.CurrentDirectory = "' + workdir + '"\n'
+            'cmd = """" & py & """ """ & relay & """ --host ' + host + " --port " + str(port) + '"\n'
+            "On Error Resume Next\n"
+            "sh.Run cmd, 0, False\n"
+            "rc = Err.Number\n"
+            "If rc <> 0 Then\n"
+            '  fso.OpenTextFile(logf, 8, True).WriteLine Now & " [ERROR] spawn failed: " & Err.Description\n'
+            "  WScript.Quit 1\n"
+            "End If\n"
+        )
+
+    if kind == "macos":
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0">\n'
+            "<dict>\n"
+            "  <key>Label</key>\n"
+            "  <string>local.agentinn.relay</string>\n"
+            "  <key>ProgramArguments</key>\n"
+            "  <array>\n"
+            "    <string>" + python + "</string>\n"
+            "    <string>" + script + "</string>\n"
+            "    <string>--host</string>\n"
+            "    <string>" + host + "</string>\n"
+            "    <string>--port</string>\n"
+            "    <string>" + str(port) + "</string>\n"
+            "  </array>\n"
+            "  <key>RunAtLoad</key>\n"
+            "  <true/>\n"
+            "  <key>StandardOutPath</key>\n"
+            "  <string>" + log + "</string>\n"
+            "  <key>StandardErrorPath</key>\n"
+            "  <string>" + log + "</string>\n"
+            "</dict>\n"
+            "</plist>\n"
+        )
+
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=agentinn relay\n"
+        "Comment=Local OpenAI-compatible relay for qoderclicn session\n"
+        'Exec="' + python + '" "' + script + '" --host ' + host + " --port " + str(port) + "\n"
+        "Terminal=false\n"
+        "X-GNOME-Autostart-enabled=true\n"
+    )
+
+
+def _relay_port_listening(port, _run=None):
+    """**非网络**端口探活：查系统监听表，不建 socket、不发起连接。
+
+    为什么需要它：`_relay_pid_alive()` 依赖 pidfile，而 pidfile 可能缺失
+    （旧版 relay / 手工启动 / 用户清理过 scripts 目录）。此时若直接判 False，
+    doctor 会把「明明在服务中的 relay」报成 running=false —— 诊断谎报比不报更糟。
+
+    Windows 用 `netstat -ano -p TCP` 解析 LISTENING 行；POSIX 读 /proc/net/tcp
+    （state 0A = LISTEN），不依赖 ss/lsof。`_run` 可注入（单测不跑真实命令）。
+    """
+    try:
+        if os.name == "nt":
+            if _run is not None:
+                text = _run(["netstat", "-ano", "-p", "TCP"])
+            else:
+                import subprocess as _sp
+                r = _sp.run(["netstat", "-ano", "-p", "TCP"],
+                            capture_output=True, creationflags=0x08000000, timeout=10)
+                text = (r.stdout or b"").decode("utf-8", errors="replace")
+            want = ":%d" % int(port)
+            for line in (text or "").splitlines():
+                parts = line.split()
+                if len(parts) >= 4 and parts[1].endswith(want) \
+                        and parts[3].upper() == "LISTENING":
+                    return True
+            return False
+        with open("/proc/net/tcp", "r", encoding="utf-8") as f:
+            for line in f.readlines()[1:]:
+                cols = line.split()
+                if len(cols) >= 4 and cols[3] == "0A" \
+                        and int(cols[1].split(":")[1], 16) == int(port):
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def _relay_pid_alive(_port_fn=None):
+    """**非网络**探活：pidfile 记录的进程是否仍在；pidfile 缺失时退化为监听表查询。
+
+    与 `_relay_is_running()`（socket connect_ex）的区别：`doctor` 默认必须零网络
+    （SC-DOC-009 用 socket 探针自校准），故 doctor 路径禁止创建 socket。
+    pidfile 存在 ⇒ 以它为准（进程死了就是 False，不再猜端口，避免把别人占用
+    8799 当成自己的 relay）；pidfile 缺失 ⇒ 才查监听表兜底。
+    """
+    pid = _relay_read_pid()
+    if not pid:
+        fn = _port_fn or _relay_port_listening
+        try:
+            return bool(fn(QODER_CLI_RELAY_PORT))
+        except Exception:
+            return False
+    try:
+        if os.name == "nt":
+            import subprocess as _sp
+            r = _sp.run(["tasklist", "/FI", "PID eq %d" % int(pid), "/NH"],
+                        capture_output=True, creationflags=0x08000000, timeout=10)
+            text = (r.stdout or b"").decode("utf-8", errors="replace")
+            return str(int(pid)) in text
+        os.kill(int(pid), 0)   # POSIX：signal 0 只做存在性检查
+        return True
+    except Exception:
+        return False
+
+
+def _autostart_referenced_script(text):
+    """从自启产物全文里提取它引用的 relay 脚本路径（供 stale 判定）。"""
+    import re as _re
+    if not text:
+        return None
+    m = _re.search(r'([A-Za-z]:[\\/][^"\'\r\n]*qodercli_relay\.py'
+                   r'|/[^"\'\r\n]*qodercli_relay\.py)', text)
+    return m.group(1) if m else None
+
+
+def _autostart_status(platform=None, home=None, appdata=None, _port_fn=None):
+    """自启状态：**两个独立维度** —— 是否已注册（产物在不在）与进程是否在跑（SC-104）。
+
+    产物存在但内引用的 relay 脚本已不存在 ⇒ stale=true，而 registered 仍为 true
+    （产物确实在，只是失效；不得报成 registered=false，SC-105）。
+    """
+    path = _autostart_target_path(platform=platform, home=home, appdata=appdata)
+    registered = os.path.exists(path)
+    probe = _port_fn or _relay_is_running
+    try:
+        running = bool(probe(QODER_CLI_RELAY_PORT))
+    except Exception:
+        running = False
+    info = {"ok": True, "registered": registered, "path": path,
+            "running": running, "pid": (_relay_read_pid() if running else None),
+            "stale": False, "stale_reason": None, "script": None}
+    if not registered:
+        return info
+    text = ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError as exc:
+        info["stale"] = True
+        info["stale_reason"] = f"artifact unreadable: {exc}"
+        return info
+    script = _autostart_referenced_script(text) or QODER_CLI_RELAY_SCRIPT
+    info["script"] = script
+    if not os.path.exists(script):
+        info["stale"] = True
+        info["stale_reason"] = f"referenced relay script missing: {script}"
+    return info
+
+
+def _autostart_install(platform=None, home=None, appdata=None, script=None,
+                       _status_fn=None, _start_fn=None):
+    """注册开机自启：写产物（**幂等**，SC-101）+ relay 未运行则拉起（SC-102）。
+
+    relay 已在跑时**短路**：绝不调用 `_relay_start()`（其语义是「先停再起」，
+    pick_model.py 的 `_relay_start` 会先 `_relay_stop()`），否则会打断在用会话（SC-110）。
+    """
+    path = _autostart_target_path(platform=platform, home=home, appdata=appdata)
+    content = _autostart_render(platform=platform, script=script)
+    existed = os.path.exists(path)
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+    except OSError as exc:
+        return {"ok": False, "reason": "write_failed", "detail": str(exc),
+                "path": path, "registered": False}
+
+    status_fn = _status_fn or _autostart_status
+    start_fn = _start_fn or _relay_start
+    result = {"ok": True, "registered": True, "path": path,
+              "overwritten": existed, "already_exists": existed}
+    try:
+        st = status_fn(platform=platform, home=home, appdata=appdata) \
+            if status_fn is _autostart_status else status_fn()
+    except TypeError:
+        st = status_fn()
+    except Exception:
+        st = {}
+    if isinstance(st, dict) and st.get("running"):
+        result["relay"] = {"state": "already_running", "pid": st.get("pid")}
+        result["relay_pid"] = st.get("pid")
+        return result
+    try:
+        started = start_fn()
+    except Exception as exc:
+        started = {"ok": False, "reason": "spawn_failed", "detail": str(exc)}
+    ok_started = bool(isinstance(started, dict) and started.get("ok"))
+    result["relay"] = {"state": "started" if ok_started else "start_failed",
+                       "pid": (started.get("pid") if isinstance(started, dict) else None)}
+    result["relay_pid"] = result["relay"]["pid"]
+    if not ok_started:
+        result["relay_detail"] = started
+    return result
+
+
+def _autostart_uninstall(platform=None, home=None, appdata=None):
+    """注销开机自启：**只删产物**，不动正在服务中的 relay（与进程管理正交，SC-103）。
+
+    幂等：产物本就不存在时返回 ok=true（removed=false），不报异常。
+    """
+    path = _autostart_target_path(platform=platform, home=home, appdata=appdata)
+    if not os.path.exists(path):
+        return {"ok": True, "removed": False, "path": path, "registered": False,
+                "relay_untouched": True}
+    try:
+        os.remove(path)
+    except OSError as exc:
+        return {"ok": False, "reason": "remove_failed", "detail": str(exc),
+                "path": path, "registered": True}
+    return {"ok": True, "removed": True, "path": path, "registered": False,
+            "relay_untouched": True}
+
+
+# ── 免费模型声明（哪些 qoder 模型算免费，由用户声明）──────────────────
+#
+# 背景：`qoderclicn --list-models` **只输出模型名**，没有任何免费/付费字段；
+# relay 的 usage 也全是 -1 ⇒ 免费与否在数据上不可判定，只能**声明**。
+# 声明存 state 的独立键（与 free_allowlist 同构，不新增文件 = 不新增锁与损坏面）：
+#   state["qoder_free_ids"] = ["Qwen3.8-Flash"]
+# 无声明时用内置默认做种子（自举，SC-203），永不空转。
+QODER_FREE_IDS_KEY = "qoder_free_ids"
+QODER_FREE_DEFAULT_IDS = ["Qwen3.8-Flash"]
+
+
+def _qoder_free_declared(state=None):
+    """读取免费声明名单 → (ids, source)，source ∈ {"user", "builtin"}。
+
+    容错（防御手改 / 旧版 state）：非 list / 非 dict / 元素非字符串或空串 → 丢弃；
+    重复 id → 去重保序。空结果视同未声明 ⇒ 回落内置默认。
+    """
+    st = state if state is not None else load_state()
+    raw = (st or {}).get(QODER_FREE_IDS_KEY)
+    if isinstance(raw, dict):
+        raw = raw.get("ids")
+    ids = []
+    seen = set()
+    if isinstance(raw, list):
+        for x in raw:
+            if isinstance(x, str) and x and x not in seen:
+                seen.add(x)
+                ids.append(x)
+    if ids:
+        return ids, "user"
+    return list(QODER_FREE_DEFAULT_IDS), "builtin"
+
+
+def _set_qoder_free_ids(ids, state=None):
+    """写入免费声明名单（state 独立键，plain list 形态）。返回 (state, saved_count)。"""
+    st = state if state is not None else load_state()
+    clean = []
+    seen = set()
+    for x in ids or []:
+        if isinstance(x, str) and x and x not in seen:
+            seen.add(x)
+            clean.append(x)
+    st[QODER_FREE_IDS_KEY] = clean
+    save_state(st)
+    return st, len(clean)
+
+
+def _reset_qoder_free_ids(state=None):
+    """移除免费声明 ⇒ 回落内置默认（source=builtin，SC-202）。返回 (state, removed)。"""
+    st = state if state is not None else load_state()
+    removed = QODER_FREE_IDS_KEY in st
+    st.pop(QODER_FREE_IDS_KEY, None)
+    save_state(st)
+    return st, removed
+
 
 def _load_models_json_raw(target=None):
     """读 models.json 的**原始 list**（不做 vendor 过滤）。
@@ -5341,13 +5835,20 @@ def _dispatch_window(args):
 
 
 def cmd_reset(args):
-    """重置轮次状态（保留用量统计 + 免费白名单）。"""
+    """重置轮次状态（保留用量统计 + 免费白名单 + 免费声明等用户确认结果）。"""
     current = load_state()
     state = {"strategy": "round-robin", "index": 0, "history": [], "known_models": current.get("known_models", [])}
     # 白名单是**用户确认结果**，不是轮次状态：reset 只重置轮询位/历史。
     # 仅当存在时才写入，保证无白名单场景的输出与改动前逐字一致。
-    if FREE_ALLOWLIST_KEY in current:
-        state[FREE_ALLOWLIST_KEY] = current[FREE_ALLOWLIST_KEY]
+    #
+    # v5.7.7：与 `cmd_next` 的 preserved 白名单保持**同一套保留集合** —— 否则
+    # 用户跑一次 reset 就会静默丢掉免费声明（qoder_free_ids），下次 sync 回落内置
+    # 默认并把其余已声明模型删掉。凡属「用户确认结果 / 学习成果」的键都必须保留。
+    for _keep in (FREE_ALLOWLIST_KEY, RELAY_ONBOARD_KEY, "cost_gate",
+                  KNOWN_FREE_STATE_KEY, TRANSCRIPT_SCAN_MTIME_KEY,
+                  QODER_FREE_IDS_KEY):
+        if _keep in current:
+            state[_keep] = current[_keep]
     try:
         with state_file_lock():
             save_state(state)
@@ -6031,9 +6532,19 @@ def main():
     p_cl.add_argument("--model", required=True, help="模型 ID")
 
     p_qf = sub.add_parser("qoder-free", help="Qoderclicn 直扫源（自动发现 + 本地 relay）")
-    p_qf.add_argument("qf_action", choices=["sync", "status", "relay-start", "relay-stop", "relay-status"],
-                      help="sync=强刷发现并写 models.json；status=CLI 可达性+relay 状态；"
-                           "relay-start/stop/status=本地 relay 进程管理（方案 A）")
+    p_qf.add_argument("qf_action",
+                      choices=["sync", "status", "relay-start", "relay-stop", "relay-status",
+                               "autostart", "free-set", "free-show", "free-reset"],
+                      help="sync=强刷发现并按免费声明写 models.json；status=CLI 可达性+relay 状态；"
+                           "relay-start/stop/status=本地 relay 进程管理（方案 A）；"
+                           "autostart install|uninstall|status=开机自启注册；"
+                           "free-set/free-show/free-reset=免费模型声明名单")
+    p_qf.add_argument("qf_sub", nargs="?", default=None,
+                      help="autostart 的子动作：install | uninstall | status")
+    p_qf.add_argument("--ids", dest="qf_ids", default=None,
+                      help="free-set 的模型 id 列表（逗号分隔，如 Qwen3.8-Flash）")
+    p_qf.add_argument("--all", dest="qf_all", action="store_true",
+                      help="sync 时忽略免费声明、写入 CLI 列出的全部模型（显式越权）")
 
     p_kf = sub.add_parser("known-free", help="账号级免费学习结果（transcript credit:0）")
     p_kf.add_argument("action", choices=["list", "clear", "learn"], nargs="?", default="list",

@@ -27,7 +27,7 @@ description: |
           流量统计、模型配额、自动切换、免费量到了、hy3、hy4、平台模型、免费时段、
           确认免费模型、免费模型白名单、额度用完、额度告警、
           时段滚轮、免费时段确认、改免费时段、window set、relay-window
-version: "5.7.6"
+version: "5.7.7"
 author: agent_created
 license: unknown
 
@@ -68,7 +68,7 @@ WorkBuddy 的 Agent 工具 `model` 参数接受模型 ID。`models.json` 中的�
 
 ## Qoderclicn 本地 relay（方案 A 落地）
 
-15 条 `qoderCliOwner` 条目的 `url` 已指向 `http://127.0.0.1:8799/v1`，**但 relay 进程未起时这些模型无法被调用**（宿主 WorkBuddy 打到 8799 会连接失败）。故使用前必须先把 relay 起起来。
+`qoderCliOwner` 条目的 `url` 已指向 `http://127.0.0.1:8799/v1`，**relay 进程未起时这些模型无法被调用**（宿主 WorkBuddy 打到 8799 会连接失败）。v5.7.7 起正常安装会注册开机自启并在登录时自动拉起，故 `relay-start` 退化为**兜底命令**：先 `agentinn qoder-free autostart status` 看 `registered` / `running`，两者都为 false 时才需要手动 `relay-start`。
 
 ### 它是什么 / 数据流
 
@@ -113,9 +113,42 @@ agentinn qoder-free relay-stop    # 按 pidfile + 端口兜底强杀（taskkill 
 2. **不支持 tools / function calling**：CLI 不暴露，故这些模型无法用于需要工具调用的 Agent 任务（`doctor --check-tools` 对它们不适用）。
 3. **流式**：缓冲完成后发单个 SSE chunk + `[DONE]`（够骗过基础 SSE 客户端），非真流式。
 
+### 开机自启（v5.7.7）
+
+```bash
+agentinn qoder-free autostart install    # 注册登录自启（幂等；relay 未跑则立即拉起）
+agentinn qoder-free autostart status     # {registered, path, running, pid, stale}
+agentinn qoder-free autostart uninstall  # 只摘自启，不停正在服务中的 relay
+```
+
+- **三平台落点**：Windows `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\agentinn-relay.vbs`（`pythonw.exe` + `WScript.Shell.Run(..., 0, False)` ⇒ 无控制台黑框）；Linux `~/.config/autostart/agentinn-relay.desktop`；macOS `~/Library/LaunchAgents/local.agentinn.relay.plist`（`RunAtLoad`）。
+- **产物不含任何凭据**：全文只有解释器路径、relay 脚本路径、端口与日志路径。`doctor` 会多一行 `category=autostart` 回答「注册没有 / 进程在不在」。
+- **失败可见**：产物内带 `FileExists` 守卫，脚本或解释器缺失时**立即退出**并把原因追加到 `scripts/relay-autostart.log`，不弹窗、不挂起。
+- **install 不打断在用会话**：relay 已在跑时短路（`_relay_start` 是「先停再起」语义，直接调用会打断会话），返回 `relay.state=already_running`。
+- **uninstall 与进程管理正交**：只删产物，不杀 relay；重复执行仍返回 `ok=true`。
+- `install.sh` 默认在安装末尾注册；`bash install.sh --no-autostart` 可跳过。
+
+### 免费模型声明（v5.7.7 —— 为什么需要「声明」）
+
+`qoderclicn --list-models` **只输出模型名，没有任何免费/付费字段**，relay 的 usage 也全是 `-1` ⇒ 免费与否在数据上不可判定。因此改为**声明式**：只有声明过的 id 才写进下拉框。
+
+```bash
+agentinn qoder-free free-set --ids Qwen3.8-Flash   # 声明（逗号分隔可多个）
+agentinn qoder-free free-show                      # 回显 {ids, source: user|builtin}
+agentinn qoder-free free-reset                     # 清声明，回落内置默认
+agentinn qoder-free sync                           # 按声明刷新 models.json
+agentinn qoder-free sync --all                     # 显式越权：写入 CLI 列出的全部模型
+```
+
+- **无声明自举**：默认 `["Qwen3.8-Flash"]`（`QODER_FREE_DEFAULT_IDS`），永不空转。
+- **漂移可见**：`sync` 返回 `stale`（声明里有、CLI 已无 ⇒ 不写入 + 提示用 `free-set` 重设）与 `undetermined`（CLI 有、未声明 ⇒ 不写入），**都不静默**。
+- **迁移清理**：本 skill 自己写过的条目（`bridged=true` **且** `qoderCliOwner=qoderclicn`）若已不在声明里会被移除，**删除前先 `models.json.bak-<ts>` 备份**；用户自建条目逐字段不变。
+- **免费款轮换怎么办**：换款后跑 `free-set --ids <新id>`；忘了也没关系，`sync` 的 `stale` 会先提醒你。
+- 声明存在 `agentinn-state.json` 的 `qoder_free_ids`，且已加入 `cmd_next` 的 `preserved` 白名单（策略切换不会抹掉）。
+
 ### 已知缺口（待用户拍板）
 
-- **未做开机自启 / 崩溃拉起**：relay 是手动 `relay-start` 的常驻进程，机器重启或进程意外退出后需手动重启。若要"随 WorkBuddy 启动自动拉起"，需额外的启动钩子（如 Windows 任务计划程序 / WorkBuddy 启动脚本接入），当前未实现。
+- **崩溃拉起（非登录）未做**：`autostart install` 解决的是「登录时自动起」，进程中途崩溃仍需手动 `relay-start`（或由 WorkBuddy 启动钩子兜底）。若要做常驻看门狗，需额外的定时探活机制，当前未实现。
 
 ## 统一启用向导（Step 0，v5.6.0 —— 单次渲染）
 
@@ -807,7 +840,8 @@ agentinn doctor
 |----------|------|------|
 | `models_missing` / `models_empty` | error | models.json 缺失或无可用模型 |
 | `url_missing` / `url_invalid` | error | 某 `vendor=Custom` 条目缺 `url`，或 `url` 非 `http(s)://`（v5.3 结构档） |
-| `apikey_missing` | error | 某模型没有 apiKey，完全不可用 |
+| `apikey_missing` | error | 某模型没有 apiKey，完全不可用（**桥接条目豁免**：`bridged` 且 `qodercli_relay` 的条目空 key 是设计使然，见下行）|
+| `apikey_bridged` | info | 桥接条目 apiKey 为空，由本地 relay 经 qoderclicn 会话鉴权，**非缺陷**（v5.7.7）|
 | `apikey_env_undefined` | error | apiKey 引用的 `${VAR}` 环境变量未定义（v5.3） |
 | `all_models_unavailable` | error | 全部模型被过滤，`next` 必然 exit 2 |
 | `key_invalid` | error | 密钥被端点拒绝（仅 `--check-key`，v5.3） |
@@ -822,6 +856,7 @@ agentinn doctor
 | `tool_call_unknown` | warn | 工具调用能力**无法判定**（端点不可达 / 密钥无效 / 响应截断或不可解析 —— 不误报为「不支持」，v5.4） |
 | `rate_limited` | info | 某模型限流中 |
 | `window_status` | info | 当前时段 + 活动期配置来源 |
+| `autostart` | warn / info | 开机自启注册与 relay 进程状态；未注册且 relay 未跑 → warn（v5.7.7）|
 
 ### 联网检查档（v5.3 起分档，v5.4 加工具调用档；默认关闭）
 
@@ -875,7 +910,9 @@ agentinn doctor
 |--------------|--------|
 | `all_models_unavailable` | `doctor --fix-unsafe`（会重新启用模型，注意费用）|
 | `quota_exhausted` | 该模型选不中；要么 `--fix-unsafe` 重置，要么调大 `quota set --max-requests` |
-| `apikey_missing` / `apikey_placeholder` | 改 models.json 填真实 key |
+| `apikey_missing` / `apikey_placeholder`（**非桥接**条目）| 改 models.json 填真实 key |
+| `apikey_bridged` | 无需处理：由本地 relay 鉴权；要确认 relay 在跑就看 `autostart` 那一行 |
+| `autostart` = warn | `agentinn qoder-free autostart install`（或 `bash install.sh` 默认已注册）|
 | `orphan_usage` | `doctor --fix`（安全）|
 | `activity_expired` | 在 models.json 末尾加 `{"freeWindow": {"until": "..."}}` 延长 |
 | 一切正常但仍选不到模型 | 跑 `window` 看时段（收费时段 `--source auto` 只用自定义模型）|
